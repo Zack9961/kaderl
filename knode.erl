@@ -1,19 +1,20 @@
 -module(knode).
 -behaviour(gen_server).
 -export([start_link/0, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
--export([ping/0, stop/0, get_id/0, read_store/0]).
+-export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1]).
 
-%% Client API
 start_link() ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, #{}, []).
 
-%% gen_server callbacks
 init(State) ->
     Id = generate_node_id(),
     io:format("Kademlia node starting, initial state: ~p, id: ~p~n", [State, Id]),
     StoreTable = ets:new(kademlia_store, [set, named_table]),
-    % Inizializza lo stato con un contatore e una tabella ETS
-    {ok, {Id, 0, State, StoreTable}}.
+    KBuckets = ets:new(buckets, [set, named_table]),
+    % Inizializza la tabella KBuckets con 160 intervalli
+    initialize_kbuckets(KBuckets),
+    % Inizializza lo stato con un contatore (che può servire per fare logging) e una tabella ETS
+    {ok, {Id, 0, State, StoreTable, KBuckets}}.
 
 handle_call({ping, Sender}, _From, {Id, Counter, State, StoreTable}) ->
     io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, Sender]),
@@ -77,3 +78,16 @@ generate_node_id() ->
     HashValue = crypto:hash(sha, integer_to_binary(RandomInteger)),
     % 3. L'HashValue è ora il tuo ID a 160 bit
     HashValue.
+
+% Funzione per inizializzare gli intervalli della tabella KBuckets
+initialize_kbuckets(KBuckets) ->
+    lists:foreach(
+        fun(N) ->
+            {LowerBound, UpperBound} =
+                {LowerBound = 1 bsl N, UpperBound = (1 bsl (N + 1)) - 1},
+            % Inserisci l'intervallo vuoto nella tabella KBuckets
+            ets:insert(KBuckets, {{LowerBound, UpperBound}, []})
+        % Genera una lista di 160 elementi
+        end,
+        lists:seq(0, 159)
+    ).
