@@ -1,7 +1,7 @@
 -module(knode).
 -behaviour(gen_server).
 -export([start_link/2, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
--export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1, find_node/1]).
+-export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1, find_node/1, find_value/1]).
 
 start_link(Name, BootstrapNode) ->
     gen_server:start_link({local, Name}, ?MODULE, #{bootstrap => BootstrapNode}, []).
@@ -63,6 +63,22 @@ handle_call({find_node, ToFindNodeId}, _From, {Id, Counter, State, StoreTable, K
     % 3. Rispondi al nodo richiedente con la lista dei nodi più vicini
     _From ! {found_nodes, ClosestNodes},
     {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
+handle_call({find_value, Key}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from ~p~n", [
+        self(), Id, Key, _From
+    ]),
+    case ets:lookup(StoreTable, Key) of
+        [{Key, Value}] ->
+            % Il nodo ha il valore, lo restituisce
+            _From ! {found_value, Value},
+            {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
+        [] ->
+            % Il nodo non ha il valore, restituisce i nodi più vicini
+            KBucketsList = ets:tab2list(KBuckets),
+            ClosestNodes = find_closest_nodes(Key, KBucketsList),
+            _From ! {found_nodes, ClosestNodes},
+            {reply, ok, {Id, Counter, State, StoreTable, KBuckets}}
+    end;
 handle_call(_Request, _From, State) ->
     io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
@@ -107,6 +123,9 @@ read_store() ->
 
 find_node(ToFindNodeId) ->
     gen_server:call(?MODULE, {find_node, ToFindNodeId}).
+
+find_value(Key) ->
+    gen_server:call(?MODULE, {find_value, Key}).
 
 generate_node_id() ->
     % 1. Genera un intero casuale grande (ad es. a 64 bit)
