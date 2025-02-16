@@ -25,7 +25,7 @@ init(State) ->
         % Connetto al nodo bootstrap
         _ ->
             io:format("Nodo ~p si connette a bootstrap ~p~n", [Id, BootstrapNode]),
-            BootstrapNode ! {join_request, self()},
+            BootstrapNode ! {join_request, self(), Id},
             {ok, NewState}
     end.
 
@@ -87,11 +87,28 @@ handle_cast(_Msg, State) ->
     io:format("Received cast message: ~p~n", [_Msg]),
     {noreply, State}.
 
-handle_info({join_request, NewNode}, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Nodo ~p ricevuto join_request da ~p~n", [Id, NewNode]),
-    % aggiungo newnode ai kbuckets appropriati
+handle_info({join_request, PIDNewNode, IdNewNode}, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PIDNewNode]),
+    K = 20,
+    % 2. Calcola la distanza tra il mio ID e l'ID del NewNode
+    Distanza = calcola_distanza(Id, IdNewNode),
+
+    % 3. Determina a quale k-bucket appartiene questa distanza
+    BucketIndex = get_bucket_index(Distanza),
+
+    % 4. Recupera la lista attuale di nodi nel k-bucket
+    KBucketsList = ets:tab2list(KBuckets),
+    % Ottieni i nodi nel bucket
+    {_, NodesInBucket} = lists:nth(BucketIndex, KBucketsList),
+
+    % 5. Aggiungi il NewNode al k-bucket (gestendo l'eviction se necessario)
+    NewBucketNodes = add_node_to_bucket(IdNewNode, NodesInBucket, K),
+
+    % 6. Aggiorna la tabella ETS con il nuovo k-bucket
+    ets:insert(KBuckets, {{BucketIndex}, NewBucketNodes}),
+
     % invia i miei k-buckets
-    NewNode ! {k_buckets, ets:tab2list(KBuckets)},
+    PIDNewNode ! {k_buckets, ets:tab2list(KBuckets)},
     {noreply, {Id, Counter, State, StoreTable, KBuckets}};
 handle_info({k_buckets, Buckets}, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, Buckets]),
@@ -133,8 +150,9 @@ generate_node_id() ->
     RandomInteger = rand:uniform(18446744073709551615),
     % 2. Applica la funzione hash SHA-1
     HashValue = crypto:hash(sha, integer_to_binary(RandomInteger)),
-    % 3. L'HashValue è ora il tuo ID a 160 bit
-    HashValue.
+    % 3. Converto l'id in binario grezzo in un intero decimale
+    IntHashValue = binary_to_integer_representation(HashValue),
+    IntHashValue.
 
 % Funzione per inizializzare gli intervalli della tabella KBuckets
 initialize_kbuckets(KBuckets) ->
@@ -150,11 +168,9 @@ initialize_kbuckets(KBuckets) ->
     ).
 
 calcola_distanza(Id1, Id2) ->
-    %Converte gli identificatori binari in interi
-    Int1 = binary_to_integer(Id1),
-    Int2 = binary_to_integer(Id2),
-    %Calcola la distanza con XOR
-    Int1 bxor Int2.
+    Distanza = Id1 bxor Id2,
+    io:format("La distanza calcolata è: ~p ~n", [Distanza]),
+    Distanza.
 
 %FUNZIONE DA DEBUGGARE, MAI PROVATA
 find_closest_nodes(ToFindNodeId, KBuckets) ->
@@ -186,3 +202,25 @@ aggiungi_distanza(Nodi, IdRiferimento) ->
         end,
         Nodi
     ).
+
+get_bucket_index(Distanza) ->
+    % Implementa la logica per determinare a quale bucket appartiene la distanza
+    % Esempio: bucket_index(Distanza) when Distanza >= 2#0000 and Distanza < 2#0001 -> 0;
+    %          ...
+    %          bucket_index(Distanza) -> 159.
+    Distanza.
+
+% Funzione per aggiungere un nodo al bucket (gestendo l'eviction se necessario)
+add_node_to_bucket(NewNodeId, BucketNodes, K) ->
+    if
+        length(BucketNodes) < K ->
+            [NewNodeId | BucketNodes];
+        true ->
+            [_ | Rest] = BucketNodes,
+            [NewNodeId | Rest]
+    end.
+
+binary_to_integer_representation(Binary) ->
+    io:format("Il binario grezzo è: ~p ~n", [Binary]),
+    Bytes = binary_to_list(Binary),
+    lists:foldl(fun(Byte, Acc) -> (Acc bsl 8) bor Byte end, 0, Bytes).
