@@ -1,5 +1,6 @@
 -module(knode).
 -behaviour(gen_server).
+-include_lib("stdlib/include/ms_transform.hrl").
 -export([start_link/2, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1, find_node/1, find_value/1]).
 
@@ -89,23 +90,33 @@ handle_cast(_Msg, State) ->
 
 handle_info({join_request, PIDNewNode, IdNewNode}, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PIDNewNode]),
-    K = 20,
-    % 2. Calcola la distanza tra il mio ID e l'ID del NewNode
+    K = 5,
+    % Calcolo la distanza tra il mio ID e l'ID del NewNode
     Distanza = calcola_distanza(Id, IdNewNode),
 
-    % 3. Determina a quale k-bucket appartiene questa distanza
-    BucketIndex = get_bucket_index(Distanza),
+    % Ottengo il giusto intervallo del k-bucket
+    RightKbucket = get_right_bucket_interval(Distanza, KBuckets),
+    io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
 
-    % 4. Recupera la lista attuale di nodi nel k-bucket
-    KBucketsList = ets:tab2list(KBuckets),
-    % Ottieni i nodi nel bucket
-    {_, NodesInBucket} = lists:nth(BucketIndex, KBucketsList),
+    % Recupera il contenuto corrente del k-bucket
+    [{Key, CurrentNodes}] = ets:lookup(KBuckets, RightKbucket),
+    io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
 
-    % 5. Aggiungi il NewNode al k-bucket (gestendo l'eviction se necessario)
-    NewBucketNodes = add_node_to_bucket(IdNewNode, NodesInBucket, K),
+    %aggiungo in coda
+    UpdatedNodes = CurrentNodes ++ [{PIDNewNode, IdNewNode}],
 
-    % 6. Aggiorna la tabella ETS con il nuovo k-bucket
-    ets:insert(KBuckets, {{BucketIndex}, NewBucketNodes}),
+    %Gestisco la dimensione massima del k-bucket
+    NewNodes =
+        if
+            length(UpdatedNodes) > K ->
+                % Rimuovi il nodo meno recentemente visto (alla testa della lista)
+                tl(UpdatedNodes);
+            true ->
+                UpdatedNodes
+        end,
+
+    %Reinserisco la tupla aggiornata nel k-bucket
+    ets:insert(KBuckets, {Key, NewNodes}),
 
     % invia i miei k-buckets
     PIDNewNode ! {k_buckets, ets:tab2list(KBuckets)},
@@ -203,12 +214,21 @@ aggiungi_distanza(Nodi, IdRiferimento) ->
         Nodi
     ).
 
-get_bucket_index(Distanza) ->
-    % Implementa la logica per determinare a quale bucket appartiene la distanza
-    % Esempio: bucket_index(Distanza) when Distanza >= 2#0000 and Distanza < 2#0001 -> 0;
-    %          ...
-    %          bucket_index(Distanza) -> 159.
-    Distanza.
+get_right_bucket_interval(Distanza, KBuckets) ->
+    MS = ets:fun2ms(
+        fun({{LowerBound, UpperBound}, ListOfNodes}) when
+            Distanza >= LowerBound, Distanza =< UpperBound
+        ->
+            {LowerBound, UpperBound}
+        end
+    ),
+    case ets:select(KBuckets, MS) of
+        [Bucket] ->
+            Bucket;
+        [] ->
+            % Nessun bucket trovato (caso teoricamente impossibile)
+            false
+    end.
 
 % Funzione per aggiungere un nodo al bucket (gestendo l'eviction se necessario)
 add_node_to_bucket(NewNodeId, BucketNodes, K) ->
