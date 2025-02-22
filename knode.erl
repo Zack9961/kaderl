@@ -16,20 +16,34 @@ init(State) ->
     % Inizializza la tabella KBuckets con 160 intervalli
     initialize_kbuckets(KBuckets),
     %recupero il nodo bootstrap
-    BootstrapNode = maps:get(bootstrap, State, undefined),
+    BootstrapNodePID = maps:get(bootstrap, State, undefined),
 
     NewState = {Id, 0, State, StoreTable, KBuckets},
-    case BootstrapNode of
+    case BootstrapNodePID of
         % Sono il primo nodo
         undefined ->
             io:format("Nodo ~p diventato bootstrap~n", [Id]),
             {ok, NewState};
         % Connetto al nodo bootstrap
         _ ->
-            io:format("Nodo ~p si connette a bootstrap ~p~n", [Id, BootstrapNode]),
-            adding_bootstrap_node_in_kbuckets(BootstrapNode, KBuckets, Id),
-            BootstrapNode ! {join_request, self(), Id},
-            {ok, NewState}
+            io:format("Nodo ~p si connette a bootstrap ~p~n", [Id, BootstrapNodePID]),
+            % Verifico se il nodo bootstrap è vivo
+            case catch gen_server:call(BootstrapNodePID, get_id, 2000) of
+                {'EXIT', Reason} ->
+                    % Nodo bootstrap non raggiungibile, divento bootstrap
+                    io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
+                        BootstrapNodePID, Reason
+                    ]),
+                    {ok, NewState};
+                BootstrapID ->
+                    % Nodo bootstrap raggiungibile, procedo normalmente
+                    io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
+                        BootstrapNodePID, BootstrapID
+                    ]),
+                    adding_bootstrap_node_in_kbuckets(BootstrapNodePID, KBuckets, Id, BootstrapID),
+                    BootstrapNodePID ! {join_request, self(), Id},
+                    {ok, NewState}
+            end
     end.
 
 handle_call({ping, Sender}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
@@ -64,24 +78,25 @@ handle_call({find_node, ToFindNodeId}, _From, {Id, Counter, State, StoreTable, K
     % 2. Implementa la logica per trovare i nodi più vicini
     ClosestNodes = find_closest_nodes(ToFindNodeId, KBucketsList),
     % 3. Rispondi al nodo richiedente con la lista dei nodi più vicini
-    _From ! {found_nodes, ClosestNodes},
+    {PID, _} = _From,
+    PID ! {found_nodes, ClosestNodes},
     {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call({find_value, Key}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from ~p~n", [
         self(), Id, Key, _From
     ]),
+    {PID, _} = _From,
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
-            _From ! {found_value, Value},
-            {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
+            PID ! {found_value, Value};
         [] ->
             % Il nodo non ha il valore, restituisce i nodi più vicini
             KBucketsList = ets:tab2list(KBuckets),
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
-            _From ! {found_nodes, ClosestNodes},
-            {reply, ok, {Id, Counter, State, StoreTable, KBuckets}}
-    end;
+            PID ! {found_nodes, ClosestNodes}
+    end,
+    {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(_Request, _From, State) ->
     io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
@@ -258,33 +273,39 @@ calcola_distanza(Id1, Id2) ->
     io:format("La distanza calcolata è: ~p ~n", [Distanza]),
     Distanza.
 
-%FUNZIONE DA DEBUGGARE, MAI PROVATA
 find_closest_nodes(ToFindNodeId, KBuckets) ->
     % 1. Ottieni tutti i nodi dai k-buckets.
     Nodi = get_all_nodes_from_kbuckets(KBuckets),
+    io:format("Nodi estratti: ~p~n", [Nodi]),
 
     % 2. Calcola la distanza di ogni nodo rispetto a ToFindNodeId
     NodiConDistanza = aggiungi_distanza(Nodi, ToFindNodeId),
+    io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
 
     % 3. Ordina i nodi per distanza crescente.
     NodiOrdinati = lists:sort(
         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
     ),
+    io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
 
-    % 4. Restituisce i primi k nodi (o tutti se ce ne sono meno di k).
-    NodiOrdinati.
+    % 4. Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+    KClosestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
+    KClosestNodes = lists:map(
+        fun({IdNodo, AltroDato, _}) -> {IdNodo, AltroDato} end, KClosestNodesWithDistance
+    ),
 
-get_all_nodes_from_kbuckets(KBuckets) ->
-    %Converte la tabella ETS in una lista
-    BucketsList = ets:tab2list(KBuckets),
+    io:format("Nodi più vicini (limitati a K e senza distanza): ~p~n", [KClosestNodes]),
+    KClosestNodes.
+
+get_all_nodes_from_kbuckets(BucketsList) ->
     %Estrae tutti i nodi dai buckets
     lists:foldl(fun({_, Nodes}, Acc) -> Acc ++ Nodes end, [], BucketsList).
 
 aggiungi_distanza(Nodi, IdRiferimento) ->
     lists:map(
-        fun({IdNodo, AltroDato}) ->
+        fun({PIDNodo, IdNodo}) ->
             Distanza = calcola_distanza(IdNodo, IdRiferimento),
-            {IdNodo, AltroDato, Distanza}
+            {PIDNodo, IdNodo, Distanza}
         end,
         Nodi
     ).
@@ -306,12 +327,10 @@ get_right_bucket_interval(Distanza, KBuckets) ->
     end.
 
 binary_to_integer_representation(Binary) ->
-    io:format("Il binario grezzo è: ~p ~n", [Binary]),
     Bytes = binary_to_list(Binary),
     lists:foldl(fun(Byte, Acc) -> (Acc bsl 8) bor Byte end, 0, Bytes).
 
-adding_bootstrap_node_in_kbuckets(BootstrapPID, KBuckets, Id) ->
-    BootstrapID = gen_server:call(BootstrapPID, get_id),
+adding_bootstrap_node_in_kbuckets(BootstrapPID, KBuckets, Id, BootstrapID) ->
     io:format("Il bootstrap id è: ~p~n", [BootstrapID]),
 
     % Calcolo la distanza tra il mio ID e l'ID del BootstrapNode
