@@ -2,9 +2,9 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 5).
--define(T, 10).
+-define(T, 3600).
 -export([start_link/2, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
--export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1, find_node/1, find_value/1]).
+-export([stop/0, get_id/1, read_store/0, initialize_kbuckets/1, find_node/1, find_value/1]).
 
 start_link(Name, BootstrapNode) ->
     gen_server:start_link({local, Name}, ?MODULE, #{bootstrap => BootstrapNode}, []).
@@ -29,7 +29,10 @@ init(State) ->
         _ ->
             io:format("Nodo ~p si connette a bootstrap ~p~n", [Id, BootstrapNodePID]),
             % Verifico se il nodo bootstrap è vivo
-            case catch gen_server:call(BootstrapNodePID, get_id, 2000) of
+            %Potrei fare un genservercall con join_request direttamente, se mi risponde in modo
+            %positivo, allora
+            %case catch gen_server:call(BootstrapNodePID, get_id, 2000) of
+            case catch get_id(BootstrapNodePID) of
                 {'EXIT', Reason} ->
                     % Nodo bootstrap non raggiungibile, divento bootstrap
                     io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
@@ -43,15 +46,16 @@ init(State) ->
                     ]),
                     adding_bootstrap_node_in_kbuckets(BootstrapNodePID, KBuckets, Id, BootstrapID),
                     %gen_server:cast({join_request, self(), Id}),
+                    %RequestId = rand:uniform(18446744073709551615),
                     BootstrapNodePID ! {join_request, self(), Id},
                     {ok, NewState}
             end
     end.
 
-handle_call({ping, Sender}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, Sender]),
-    Sender ! {pong, self()},
-    {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
+handle_call({ping, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+    {PID, _} = _From,
+    io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
+    {reply, {pong, self(), RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(stop, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {stop, normal, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
@@ -247,14 +251,14 @@ terminate(_Reason, _State) ->
     io:format("Kademlia node terminating~n"),
     ok.
 
-ping() ->
-    gen_server:call(?MODULE, {ping, self()}).
+% ping() ->
+%     gen_server:call(?MODULE, {ping, self()}).
 
 stop() ->
     gen_server:cast(?MODULE, stop).
 
-get_id() ->
-    gen_server:call(?MODULE, get_id).
+get_id(PID) ->
+    gen_server:call(PID, get_id, 2000).
 
 store(Key, Value) ->
     gen_server:call(?MODULE, {store, Key, Value}).
