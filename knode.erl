@@ -2,6 +2,7 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 5).
+-define(T, 10).
 -export([start_link/2, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([ping/0, stop/0, get_id/0, read_store/0, initialize_kbuckets/1, find_node/1, find_value/1]).
 
@@ -17,7 +18,7 @@ init(State) ->
     initialize_kbuckets(KBuckets),
     %recupero il nodo bootstrap
     BootstrapNodePID = maps:get(bootstrap, State, undefined),
-
+    start_periodic_republish(self()),
     NewState = {Id, 0, State, StoreTable, KBuckets},
     case BootstrapNodePID of
         % Sono il primo nodo
@@ -41,6 +42,7 @@ init(State) ->
                         BootstrapNodePID, BootstrapID
                     ]),
                     adding_bootstrap_node_in_kbuckets(BootstrapNodePID, KBuckets, Id, BootstrapID),
+                    %gen_server:cast({join_request, self(), Id}),
                     BootstrapNodePID ! {join_request, self(), Id},
                     {ok, NewState}
             end
@@ -54,15 +56,6 @@ handle_call(stop, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {stop, normal, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {reply, Id, {Id, Counter, State, StoreTable, KBuckets}};
-handle_call({store, Key, Value}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received store request: Id=~p Key=~p, Value=~p, From=~p~n", [Id, Key, Value, _From]),
-    % Incrementa il contatore
-    NewCounter = Counter + 1,
-    % Inserisci la tupla nella tabella ETS
-    ets:insert(StoreTable, {Key, Value}),
-    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
-    % Rispondi al client
-    {reply, ok, {Id, NewCounter, State, StoreTable, KBuckets}};
 handle_call(read_store, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Received read_store request from ~p,~p~n", [_From, Id]),
     % Leggi la tabella ETS
@@ -105,7 +98,9 @@ handle_cast(_Msg, State) ->
     io:format("Received cast message: ~p~n", [_Msg]),
     {noreply, State}.
 %Guardare se deve essere call/cast
-handle_info({join_request, PIDNewNode, IdNewNode}, {Id, Counter, State, StoreTable, KBuckets}) ->
+handle_info(
+    {join_request, PIDNewNode, IdNewNode}, {Id, Counter, State, StoreTable, KBuckets}
+) ->
     io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PIDNewNode]),
 
     % Calcolo la distanza tra il mio ID e l'ID del NewNode
@@ -216,6 +211,34 @@ handle_info({k_buckets, BucketsReceived}, {Id, Counter, State, StoreTable, KBuck
         BucketsReceivedList
     ),
     {noreply, {Id, Counter, State, StoreTable, KBuckets}};
+handle_info(republish, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
+    % 1. Ripubblica i dati
+    republish_data(StoreTable, KBuckets),
+    % 2. Reimposta il timer per la prossima ripubblicazione
+    start_periodic_republish(self()),
+    {noreply, {Id, Counter, State, StoreTable, KBuckets}};
+handle_info({store, Key, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
+    % Incrementa il contatore
+    NewCounter = Counter + 1,
+    % Inserisci la tupla nella tabella ETS
+    ets:insert(StoreTable, {Key, Value}),
+    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
+    % Rispondi al client
+    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
+handle_info({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
+    % Incrementa il contatore
+    NewCounter = Counter + 1,
+    %Calcola la key
+    HashValue = crypto:hash(sha, integer_to_binary(Value)),
+    Key = binary_to_integer_representation(HashValue),
+    % Inserisci la tupla nella tabella ETS
+    ets:insert(StoreTable, {Key, Value}),
+    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
+    % Rispondi al client
+    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
 handle_info(_Info, State) ->
     io:format("Received info message: ~p~n", [_Info]),
     {noreply, State}.
@@ -273,18 +296,22 @@ calcola_distanza(Id1, Id2) ->
     io:format("La distanza calcolata è: ~p ~n", [Distanza]),
     Distanza.
 
-find_closest_nodes(ToFindNodeId, KBuckets) ->
+find_closest_nodes(Key, KBuckets) ->
     % 1. Ottieni tutti i nodi dai k-buckets.
     Nodi = get_all_nodes_from_kbuckets(KBuckets),
     io:format("Nodi estratti: ~p~n", [Nodi]),
 
     % 2. Calcola la distanza di ogni nodo rispetto a ToFindNodeId
-    NodiConDistanza = aggiungi_distanza(Nodi, ToFindNodeId),
+    NodiConDistanza = aggiungi_distanza(Nodi, Key),
     io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
+
+    %Rimuovo nodo con distanza 0
+    NodiConDistanzaNo0 = lists:filter(fun({_, _, X}) -> X =/= 0 end, NodiConDistanza),
+    io:format("Nodi con distanza senza 0: ~p~n", [NodiConDistanzaNo0]),
 
     % 3. Ordina i nodi per distanza crescente.
     NodiOrdinati = lists:sort(
-        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
+        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanzaNo0
     ),
     io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
 
@@ -349,3 +376,40 @@ adding_bootstrap_node_in_kbuckets(BootstrapPID, KBuckets, Id, BootstrapID) ->
 
     %Reinserisco la tupla aggiornata nel k-bucket
     ets:insert(KBuckets, {Key, UpdatedNodes}).
+
+start_periodic_republish(NodePID) ->
+    erlang:send_after(timer:seconds(?T), NodePID, republish).
+
+republish_data(StoreTable, KBuckets) ->
+    io:format("Sono il nodo con pid: ~p, sto ripubblicando i dati...~n", [self()]),
+
+    % 1. Ottieni tutti i dati (coppie chiave-valore) dalla tabella ETS (StoreTable).
+    Data = ets:tab2list(StoreTable),
+    io:format("Dati da ripubblicare: ~p\n", [Data]),
+
+    % 2. Ottieni la lista dei k-buckets
+    KBucketsList = ets:tab2list(KBuckets),
+
+    % 3. Per ogni dato (coppia chiave-valore):
+    lists:foreach(
+        fun({Key, Value}) ->
+            io:format("Ripubblicazione della chiave ~p\n", [Key]),
+
+            % 4. Trova i k nodi più vicini alla chiave.
+            ClosestNodes = find_closest_nodes(Key, KBucketsList),
+
+            % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
+            lists:foreach(
+                fun({NodePID, NodeId}) ->
+                    io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
+                    % Invia la richiesta STORE in modo asincrono (cast) per non bloccare il processo di ripubblicazione
+                    NodePID ! {store, Key, Value}
+                %gen_server:call(NodePID, {store, Key, Value}, 2000)
+                end,
+                ClosestNodes
+            ),
+            io:format("Richieste di store mandate per la chiave ~p\n", [Key])
+        end,
+        Data
+    ),
+    io:format("Ripubblicazione dati completata per il nodo con pid: ~p\n", [self()]).
