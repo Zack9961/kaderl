@@ -3,14 +3,15 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 5).
 -define(T, 3600).
--export([start_link/2, store/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
+-export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
     stop/0,
     get_id/1,
     read_store/0,
-    find_node/1,
-    find_value/1,
-    generate_requestId/0
+    find_node/3,
+    find_value/3,
+    ping/1,
+    find_value_iterative/4
 ]).
 
 start_link(Name, BootstrapNode) ->
@@ -35,14 +36,11 @@ init(State) ->
         % Connetto al nodo bootstrap
         _ ->
             io:format("Nodo ~p prova a connettersi a bootstrap ~p~n", [Id, BootstrapNodePID]),
-            % Verifico se il nodo bootstrap è vivo
-            %Potrei fare un genservercall con join_request direttamente, se mi risponde in modo
-            %positivo, allora mi collego a lui
             %case catch gen_server:call(BootstrapNodePID, get_id, 2000) of
             RequestId = generate_requestId(),
             case
                 catch gen_server:call(
-                    BootstrapNodePID, {join_request, Id, RequestId}
+                    BootstrapNodePID, {join_request, Id, RequestId}, 2000
                 )
             of
                 {'EXIT', Reason} ->
@@ -56,8 +54,7 @@ init(State) ->
                     io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
                         BootstrapNodePID, BootstrapID
                     ]),
-                    %Controllare se il requestId è corretto
-                    %...
+                    %Controllo se il requestId è corretto
                     case RequestId == RequestIdReceived of
                         true ->
                             %aggiungo il nodo bootstrap ai miei kbucket e poi aggiungo anche i suoi nodi
@@ -67,7 +64,7 @@ init(State) ->
                             ),
                             add_nodes_to_kbuckets(Id, BucketsReceived, KBuckets),
                             {ok, NewState};
-                        false ->
+                        _ ->
                             io:format("Sono il nodo con pid: ~p Request Id non corretto~n", [
                                 BootstrapNodePID
                             ]),
@@ -96,15 +93,25 @@ init(State) ->
         %         {ok, NewState}
         % end
     end.
-
+% handle_call(
+%     {ping_from_shell, IdToPing}, _From, {Id, Counter, State, StoreTable, KBuckets}
+% ) ->
+%     {PID, _} = _From,
+%     ping(IdToPing),
+%     io:format("Node ~p (~p) received ping_from_shell from ~p~n", [self(), Id, PID]),
+%     {reply, ok, {Id, Counter, State, StoreTable, KBuckets}};
+% handle_call({ping, Id, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+%     {PID, _} = _From,
+%     %Cerco nella mia tabella ets il pid
+%     %Una volta trovato faccio partire la funzione ping(PID)
+%     io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
 handle_call({ping, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {PID, _} = _From,
     io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
     {reply, {pong, self(), RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
-handle_call(stop, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    {stop, normal, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {reply, Id, {Id, Counter, State, StoreTable, KBuckets}};
+%Funzione cancellabile?
 handle_call({read_store, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Received read_store request from ~p,~p~n", [_From, Id]),
     % Leggi la tabella ETS
@@ -125,22 +132,24 @@ handle_call(
     % 3. Rispondi al nodo richiedente con la lista dei nodi più vicini
     {reply, {found_nodes, ClosestNodes, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call({find_value, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from ~p~n", [
-        self(), Id, Key, _From
-    ]),
     {PID, _} = _From,
+    io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
+        self(), Id, Key, PID
+    ]),
     [{Key, Value}] = ets:lookup(StoreTable, Key),
-    % case ets:lookup(StoreTable, Key) of
-    %     [{Key, Value}] ->
-    %         % Il nodo ha il valore, lo restituisce
-    %         PID ! {found_value, Value};
-    %     [] ->
-    %         % Il nodo non ha il valore, restituisce i nodi più vicini
-    %         KBucketsList = ets:tab2list(KBuckets),
-    %         ClosestNodes = find_closest_nodes(Key, KBucketsList),
-    %         PID ! {found_nodes, ClosestNodes}
-    % end,
-    {reply, {found_value, Value, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+    case ets:lookup(StoreTable, Key) of
+        [{Key, Value}] ->
+            % Il nodo ha il valore, lo restituisce
+            {reply, {found_value, Value, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+        %PID ! {found_value, Value};
+        [] ->
+            % Il nodo non ha il valore, restituisce i nodi più vicini
+            KBucketsList = ets:tab2list(KBuckets),
+            ClosestNodes = find_closest_nodes(Key, KBucketsList),
+            {reply, {found_nodes, ClosestNodes, RequestId},
+                {Id, Counter, State, StoreTable, KBuckets}}
+        %PID ! {found_nodes, ClosestNodes}
+    end;
 handle_call(
     {join_request, IdNewNode, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
 ) ->
@@ -183,67 +192,7 @@ handle_call(_Request, _From, State) ->
     io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
 
-handle_cast(_Msg, State) ->
-    io:format("Received cast message: ~p~n", [_Msg]),
-    {noreply, State}.
-%Guardare se deve essere call/cast
-% handle_info(
-%     {join_request, PIDNewNode, IdNewNode}, {Id, Counter, State, StoreTable, KBuckets}
-% ) ->
-%     io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PIDNewNode]),
-
-%     % Calcolo la distanza tra il mio ID e l'ID del NewNode
-%     Distanza = calcola_distanza(Id, IdNewNode),
-
-%     % Ottengo il giusto intervallo del k-bucket
-%     RightKbucket = get_right_bucket_interval(Distanza, KBuckets),
-%     io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
-
-%     % Recupera il contenuto corrente del k-bucket
-%     [{Key, CurrentNodes}] = ets:lookup(KBuckets, RightKbucket),
-%     io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
-
-%     %aggiungo in coda
-%     UpdatedNodes = CurrentNodes ++ [{PIDNewNode, IdNewNode}],
-
-%     %Gestisco la dimensione massima del k-bucket
-%     NewNodes =
-%         if
-%             length(UpdatedNodes) > ?K ->
-%                 % Rimuovi il nodo meno recentemente visto (alla testa della lista)
-%                 %Ricordarsi di aggiungere il ping, quindi di rimuoverlo se pingando non
-%                 %risponde, andando avanti per tutti i nodi seguenti, se tutti rispondono,
-%                 %non aggiungere il nodo
-%                 tl(UpdatedNodes);
-%             true ->
-%                 UpdatedNodes
-%         end,
-
-%     %Reinserisco la tupla aggiornata nel k-bucket
-%     ets:insert(KBuckets, {Key, NewNodes}),
-
-%     % invia i miei k-buckets
-%     PIDNewNode ! {k_buckets, KBuckets},
-%     {noreply, {Id, Counter, State, StoreTable, KBuckets}};
-% handle_info({k_buckets, BucketsReceived}, {Id, Counter, State, StoreTable, KBuckets}) ->
-%     {noreply, {Id, Counter, State, StoreTable, KBuckets}};
-handle_info(republish, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
-    % 1. Ripubblica i dati
-    republish_data(StoreTable, KBuckets),
-    % 2. Reimposta il timer per la prossima ripubblicazione
-    start_periodic_republish(self()),
-    {noreply, {Id, Counter, State, StoreTable, KBuckets}};
-handle_info({store, Key, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
-    % Incrementa il contatore
-    NewCounter = Counter + 1,
-    % Inserisci la tupla nella tabella ETS
-    ets:insert(StoreTable, {Key, Value}),
-    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
-    % Rispondi al client
-    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
-handle_info({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+handle_cast({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
     % Incrementa il contatore
     NewCounter = Counter + 1,
@@ -255,6 +204,28 @@ handle_info({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
     io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
     % Rispondi al client
     {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
+handle_cast({store, Key, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
+    % Incrementa il contatore
+    NewCounter = Counter + 1,
+    % Inserisci la tupla nella tabella ETS
+    ets:insert(StoreTable, {Key, Value}),
+    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
+    % Rispondi al client
+    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
+handle_cast(republish, {Id, Counter, State, StoreTable, KBuckets}) ->
+    io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
+    % 1. Ripubblica i dati
+    republish_data(StoreTable, KBuckets),
+    % 2. Reimposta il timer per la prossima ripubblicazione
+    start_periodic_republish(self()),
+    {noreply, {Id, Counter, State, StoreTable, KBuckets}};
+handle_cast(stop, State) ->
+    {stop, normal, State};
+handle_cast(_Msg, State) ->
+    io:format("Received cast message: ~p~n", [_Msg]),
+    {noreply, State}.
+
 handle_info(_Info, State) ->
     io:format("Received info message: ~p~n", [_Info]),
     {noreply, State}.
@@ -266,23 +237,45 @@ terminate(_Reason, _State) ->
 % ping() ->
 %     gen_server:call(?MODULE, {ping, self()}).
 
+ping(PID) ->
+    %ets:insert(KBuckets, {{nuhu, vv}, []}),
+    RequestId = generate_requestId(),
+    case gen_server:call(PID, {ping, RequestId}, 2000) of
+        {pong, ReceiverPID, ReceiverRequestId} ->
+            case RequestId == ReceiverRequestId of
+                true ->
+                    io:format("Node with PID ~p received pong from ~p~n", [self(), ReceiverPID]);
+                _ ->
+                    io:format("Sono il nodo con pid ~p, requestId ricevuto da ~p non corretto ~n", [
+                        self(), ReceiverPID
+                    ])
+            end;
+        {'EXIT', Reason} ->
+            io:format("Nodo con pid ~p non raggiungibile (~p)~n", [PID, Reason]);
+        _ ->
+            io:format("Risposta non gestita")
+    end.
+
 stop() ->
     gen_server:cast(?MODULE, stop).
 
 get_id(PID) ->
     gen_server:call(PID, get_id, 2000).
 
-store(Key, Value) ->
-    gen_server:call(?MODULE, {store, Key, Value}).
+% store(Key, Value) ->
+%     gen_server:cast(?MODULE, {store, Key, Value}).
+
+store(PID, Key, Value) ->
+    gen_server:cast(PID, {store, Key, Value}).
 
 read_store() ->
     gen_server:call(?MODULE, read_store).
 
-find_node(ToFindNodeId) ->
-    gen_server:call(?MODULE, {find_node, ToFindNodeId, generate_requestId()}).
+find_node(PID, ToFindNodeId, RequestId) ->
+    gen_server:call(PID, {find_node, ToFindNodeId, RequestId}).
 
-find_value(Key) ->
-    gen_server:call(?MODULE, {find_value, Key, generate_requestId()}).
+find_value(PID, Key, RequestId) ->
+    gen_server:call(PID, {find_value, Key, RequestId}).
 
 generate_node_id() ->
     % 1. Genera un intero casuale grande (64 bit)
@@ -316,6 +309,7 @@ calcola_distanza(Id1, Id2) ->
     Distanza.
 
 find_closest_nodes(Key, KBuckets) ->
+    %Controllare che sia un ID quindi fare check del formato
     % 1. Ottieni tutti i nodi dai k-buckets.
     Nodi = get_all_nodes_from_kbuckets(KBuckets),
     io:format("Nodi estratti: ~p~n", [Nodi]),
@@ -397,14 +391,15 @@ add_bootstrap_node_in_kbuckets(BootstrapPID, KBuckets, Id, BootstrapID) ->
     ets:insert(KBuckets, {Key, UpdatedNodes}).
 
 start_periodic_republish(NodePID) ->
-    erlang:send_after(timer:seconds(?T), NodePID, republish).
+    %erlang:send_after(timer:seconds(?T), NodePID, republish).
+    timer:apply_after(timer:seconds(?T), gen_server, cast, [NodePID, republish]).
 
 republish_data(StoreTable, KBuckets) ->
-    io:format("Sono il nodo con pid: ~p, sto ripubblicando i dati...~n", [self()]),
+    %io:format("Sono il nodo con pid: ~p, sto ripubblicando i dati...~n", [self()]),
 
     % 1. Ottieni tutti i dati (coppie chiave-valore) dalla tabella ETS (StoreTable).
     Data = ets:tab2list(StoreTable),
-    io:format("Dati da ripubblicare: ~p\n", [Data]),
+    %io:format("Dati da ripubblicare: ~p\n", [Data]),
 
     % 2. Ottieni la lista dei k-buckets
     KBucketsList = ets:tab2list(KBuckets),
@@ -412,26 +407,35 @@ republish_data(StoreTable, KBuckets) ->
     % 3. Per ogni dato (coppia chiave-valore):
     lists:foreach(
         fun({Key, Value}) ->
-            io:format("Ripubblicazione della chiave ~p\n", [Key]),
+            %io:format("Ripubblicazione della chiave ~p\n", [Key]),
 
             % 4. Trova i k nodi più vicini alla chiave.
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
+
+            % case self() == list_to_pid("<0.91.0>") of
+            %     true ->
+            %         io:format("Sono il pid 0.91.0, i nodi k trovati sono:~p", [ClosestNodes]);
+            %     _ ->
+            %         A = 1
+            % end,
 
             % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
             lists:foreach(
                 fun({NodePID, NodeId}) ->
                     io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
                     % Invia la richiesta STORE in modo asincrono (cast) per non bloccare il processo di ripubblicazione
-                    NodePID ! {store, Key, Value}
-                %gen_server:call(NodePID, {store, Key, Value}, 2000)
+                    %NodePID ! {store, Key, Value}
+                    store(NodePID, Key, Value)
+                %gen_server:cast(NodePID, {store, Key, Value})
                 end,
                 ClosestNodes
-            ),
-            io:format("Richieste di store mandate per la chiave ~p\n", [Key])
+                %,
+            )
+        %io:format("Richieste di store mandate per la chiave ~p\n", [Key])
         end,
         Data
-    ),
-    io:format("Ripubblicazione dati completata per il nodo con pid: ~p\n", [self()]).
+    ).
+%io:format("Ripubblicazione dati completata per il nodo con pid: ~p\n", [self()]).
 
 add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
     io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, BucketsReceived]),
@@ -507,3 +511,82 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
         end,
         BucketsReceivedList
     ).
+
+find_value_iterative(NodePID, Key, TriedNodes, ClosestNodes) ->
+    io:format("Interrogazione del nodo ~p per la chiave ~p\n", [NodePID, Key]),
+    case catch gen_server:call(NodePID, {find_value, Key}, 5000) of
+        {'EXIT', _} ->
+            io:format("Il nodo ~p non risponde\n", [NodePID]),
+            handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes);
+        {found_value, Value} ->
+            io:format("Valore ~p trovato sul nodo ~p\n", [Value, NodePID]),
+            {ok, Value};
+        {found_nodes, Nodes} ->
+            NewNodes = lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, Nodes),
+            case NewNodes of
+                [] ->
+                    %%Nessun nuovo nodo da interrogare
+                    case ClosestNodes of
+                        [] ->
+                            %% Non ci sono nodi vicini, la ricerca fallisce
+                            io:format("Nessun nodo trovato vicino alla chiave ~p\n", [Key]),
+                            {error, not_found};
+                        _ ->
+                            io:format("Nodi piu' vicini trovati: ~p\n", [ClosestNodes]),
+                            {error, not_found}
+                    end;
+                _ ->
+                    %%Interroga il nodo più vicino (il primo nella lista)
+                    NextNode = hd(NewNodes),
+                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], NewNodes)
+            end;
+        _ ->
+            io:format("Risposta inattesa dal nodo ~p\n", [NodePID]),
+            handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes)
+    end.
+
+handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes) ->
+    % Implementa la logica per gestire il fallimento di un nodo.
+    % Puoi provare a interrogare un altro nodo vicino o segnalare un errore.
+    io:format("Gestione del fallimento del nodo ~p\n", [NodePID]),
+    case ClosestNodes of
+        [] ->
+            io:format("Ricerca fallita per la chiave ~p\n", [Key]),
+            {error, not_found};
+        _ ->
+            % Prova con un altro nodo dai nodi più vicini
+            case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
+                [] ->
+                    % Nessun altro nodo disponibile
+                    io:format(
+                        "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
+                    ),
+                    {error, not_found};
+                [NextNode | _] ->
+                    io:format("Riprova con il nodo ~p\n", [NextNode]),
+                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], ClosestNodes)
+            end
+    end.
+
+handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes) ->
+    % Implementa la logica per gestire una risposta inattesa da un nodo.
+    % Puoi registrare l'evento, riprovare o segnalare un errore.
+    io:format("Gestione di una risposta inattesa dal nodo ~p\n", [NodePID]),
+    case ClosestNodes of
+        [] ->
+            io:format("Ricerca fallita per la chiave ~p\n", [Key]),
+            {error, not_found};
+        _ ->
+            % Prova con un altro nodo dai nodi più vicini
+            case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
+                [] ->
+                    % Nessun altro nodo disponibile
+                    io:format(
+                        "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
+                    ),
+                    {error, not_found};
+                [NextNode | _] ->
+                    io:format("Riprova con il nodo ~p\n", [NextNode]),
+                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], ClosestNodes)
+            end
+    end.
