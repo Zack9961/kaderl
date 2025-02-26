@@ -1,7 +1,7 @@
 -module(knode).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--define(K, 5).
+-define(K, 3).
 -define(T, 3600).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
@@ -11,7 +11,9 @@
     find_node/3,
     find_value/3,
     ping/1,
-    find_value_iterative/4
+    find_value_iterative/4,
+    reiterate_find_node/2,
+    reiterate_find_node/4
 ]).
 
 start_link(Name, BootstrapNode) ->
@@ -318,20 +320,19 @@ find_closest_nodes(Key, KBuckets) ->
     NodiConDistanza = aggiungi_distanza(Nodi, Key),
     io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
 
-    %Rimuovo nodo con distanza 0
-    NodiConDistanzaNo0 = lists:filter(fun({_, _, X}) -> X =/= 0 end, NodiConDistanza),
-    io:format("Nodi con distanza senza 0: ~p~n", [NodiConDistanzaNo0]),
+    % NodiConDistanzaNo0 = lists:filter(fun({_, _, X}) -> X =/= 0 end, NodiConDistanza),
+    % io:format("Nodi con distanza senza 0: ~p~n", [NodiConDistanzaNo0]),
 
     % 3. Ordina i nodi per distanza crescente.
     NodiOrdinati = lists:sort(
-        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanzaNo0
+        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
     ),
     io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
 
     % 4. Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
     KClosestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
     KClosestNodes = lists:map(
-        fun({IdNodo, AltroDato, _}) -> {IdNodo, AltroDato} end, KClosestNodesWithDistance
+        fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, KClosestNodesWithDistance
     ),
 
     io:format("Nodi più vicini (limitati a K e senza distanza): ~p~n", [KClosestNodes]),
@@ -590,3 +591,136 @@ handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes) ->
                     find_value_iterative(NextNode, Key, [NodePID | TriedNodes], ClosestNodes)
             end
     end.
+
+reiterate_find_node(Key, NodePID) ->
+    reiterate_find_node(Key, NodePID, [], 0).
+
+reiterate_find_node(Key, NodePID, BestNodes, Tries) ->
+    case Tries > 10 of
+        true ->
+            {error, max_retries_reached};
+        _ ->
+            RequestId = generate_requestId(),
+            case gen_server:call(NodePID, {find_node, Key, RequestId}, timer:seconds(2)) of
+                {found_nodes, ClosestNodes, RequestId} when is_list(ClosestNodes) ->
+                    case ClosestNodes of
+                        [] ->
+                            io:format("Nessun nodo vicino trovato, ricerca conclusa.~n", []),
+                            {ok, BestNodes};
+                        _ ->
+                            % Calcola le distanze dai nodi trovati alla chiave
+                            NodesWithDistance = lists:map(
+                                fun({Pid, Id}) ->
+                                    Distance = calcola_distanza(Key, Id),
+                                    {Pid, Id, Distance}
+                                end,
+                                ClosestNodes
+                            ),
+                            % Ordina i nodi per distanza crescente
+                            NewBestNodes = lists:sort(
+                                fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end, NodesWithDistance
+                            ),
+
+                            case BestNodes == [] of
+                                %Caso base
+                                true ->
+                                    [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
+                                    case FirstNewBestNodesDistance == 0 of
+                                        true ->
+                                            % Ferma l'iterazione
+                                            io:format(
+                                                "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+                                            ),
+                                            NewBestNodesNoDistance = lists:map(
+                                                fun({PIDNodo, IdNodo, _}) ->
+                                                    {PIDNodo, IdNodo}
+                                                end,
+                                                NewBestNodes
+                                            ),
+                                            {ok, NewBestNodesNoDistance};
+                                        _ ->
+                                            % Se ci sono nodi migliori, continua l'iterazione
+                                            io:format(
+                                                "Trovati nodi più vicini, si continua l'iterazione.~n"
+                                            ),
+                                            [{NewNodePID, _, _} | _] = NewBestNodes,
+                                            %timer:sleep(1000),
+                                            reiterate_find_node(
+                                                Key, NewNodePID, NewBestNodes, Tries + 1
+                                            )
+                                    end;
+                                _ ->
+                                    [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
+                                    [{_, _, FirstBestNodesDistance} | _] = BestNodes,
+                                    % Confronta i nuovi nodi con i migliori precedenti
+                                    case FirstNewBestNodesDistance < FirstBestNodesDistance of
+                                        true ->
+                                            case FirstNewBestNodesDistance == 0 of
+                                                true ->
+                                                    % Altrimenti, ferma l'iterazione
+                                                    io:format(
+                                                        "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+                                                    ),
+                                                    NewBestNodesNoDistance = lists:map(
+                                                        fun({PIDNodo, IdNodo, _}) ->
+                                                            {PIDNodo, IdNodo}
+                                                        end,
+                                                        NewBestNodes
+                                                    ),
+                                                    {ok, NewBestNodesNoDistance};
+                                                _ ->
+                                                    % Se ci sono nodi migliori, continua l'iterazione
+                                                    io:format(
+                                                        "Trovati nodi più vicini, si continua l'iterazione.~n"
+                                                    ),
+                                                    [{NewNodePID, _, _} | _] = NewBestNodes,
+                                                    %timer:sleep(1000),
+                                                    reiterate_find_node(
+                                                        Key, NewNodePID, NewBestNodes, Tries + 1
+                                                    )
+                                            end;
+                                        _ ->
+                                            % Altrimenti, ferma l'iterazione
+                                            io:format(
+                                                "Nessun nodo più vicino trovato, ricerca conclusa.~n"
+                                            ),
+                                            %Elimino la distanza
+                                            BestNodesNoDistance = lists:map(
+                                                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end,
+                                                BestNodes
+                                            ),
+                                            {ok, BestNodesNoDistance}
+                                    end
+                            end
+                    end;
+                {error, Reason} ->
+                    io:format("Errore durante find_node: ~p~n", [Reason]),
+                    timer:sleep(1000),
+                    reiterate_find_node(Key, NodePID, BestNodes, Tries + 1);
+                Other ->
+                    io:format("Risposta non gestita da find_node: ~p~n", [Other]),
+                    timer:sleep(1000),
+                    reiterate_find_node(Key, NodePID, BestNodes, Tries + 1)
+            end
+    end.
+
+% % Funzione per confrontare due liste di nodi e verificare se la nuova lista contiene nodi più vicini
+% sono_migliori(NewNodes, BestNodes) ->
+%     case {[NewNodes], [BestNodes]} of
+%         % Nessun nodo in entrambe le liste
+%         {[], []} ->
+%             false;
+%         % Nessun nuovo nodo, quindi non sono migliori
+%         {[], _} ->
+%             false;
+%         % Ci sono nuovi nodi e nessun nodo precedente, quindi sono migliori
+%         {_, []} ->
+%             true;
+%         _ ->
+%             % Confronta la distanza del nodo più vicino nelle due liste
+%             {_, _, NewDistance} = lists:nth(1, NewNodes),
+%             case lists:keysearch(1, 1, BestNodes) of
+%                 false -> true;
+%                 {_, _, BestDistance} -> NewDistance < BestDistance
+%             end
+%     end.
