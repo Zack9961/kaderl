@@ -1,8 +1,8 @@
 -module(knode).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--define(K, 3).
--define(T, 3600).
+-define(K, 20).
+-define(T, 30).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
     stop/0,
@@ -11,9 +11,11 @@
     find_node/3,
     find_value/3,
     ping/1,
-    find_value_iterative/4,
+    find_value_iterative/2,
     reiterate_find_node/2,
-    reiterate_find_node/4
+    reiterate_find_node/4,
+    start_nodes/1,
+    calcola_tempo_totale/1
 ]).
 
 start_link(Name, BootstrapNode) ->
@@ -21,7 +23,7 @@ start_link(Name, BootstrapNode) ->
 
 init(State) ->
     Id = generate_node_id(),
-    io:format("Kademlia node starting, initial state: ~p, id: ~p~n", [State, Id]),
+    io:format("Kademlia node ~p starting, initial state: ~p, id: ~p~n", [self(), State, Id]),
     StoreTable = ets:new(kademlia_store, [set]),
     KBuckets = ets:new(buckets, [set]),
     % Inizializza la tabella KBuckets con 160 intervalli
@@ -33,11 +35,11 @@ init(State) ->
     case BootstrapNodePID of
         % Sono il primo nodo
         undefined ->
-            io:format("Nodo ~p diventato bootstrap~n", [Id]),
+            %io:format("Nodo ~p diventato bootstrap~n", [Id]),
             {ok, NewState};
         % Connetto al nodo bootstrap
         _ ->
-            io:format("Nodo ~p prova a connettersi a bootstrap ~p~n", [Id, BootstrapNodePID]),
+            %io:format("Nodo ~p prova a connettersi a bootstrap ~p~n", [Id, BootstrapNodePID]),
             %case catch gen_server:call(BootstrapNodePID, get_id, 2000) of
             RequestId = generate_requestId(),
             case
@@ -47,15 +49,15 @@ init(State) ->
             of
                 {'EXIT', Reason} ->
                     % Nodo bootstrap non raggiungibile, divento bootstrap
-                    io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
-                        BootstrapNodePID, Reason
-                    ]),
+                    % io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
+                    %     BootstrapNodePID, Reason
+                    % ]),
                     {ok, NewState};
                 {k_buckets, BucketsReceived, BootstrapID, RequestIdReceived} ->
                     % Nodo bootstrap raggiungibile, procedo normalmente
-                    io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
-                        BootstrapNodePID, BootstrapID
-                    ]),
+                    % io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
+                    %     BootstrapNodePID, BootstrapID
+                    % ]),
                     %Controllo se il requestId è corretto
                     case RequestId == RequestIdReceived of
                         true ->
@@ -67,9 +69,9 @@ init(State) ->
                             add_nodes_to_kbuckets(Id, BucketsReceived, KBuckets),
                             {ok, NewState};
                         _ ->
-                            io:format("Sono il nodo con pid: ~p Request Id non corretto~n", [
-                                BootstrapNodePID
-                            ]),
+                            % io:format("Sono il nodo con pid: ~p Request Id non corretto~n", [
+                            %     BootstrapNodePID
+                            % ]),
                             {ok, NewState}
                     end
             end
@@ -109,24 +111,24 @@ init(State) ->
 %     io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
 handle_call({ping, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {PID, _} = _From,
-    io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
+    %io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
     {reply, {pong, self(), RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {reply, Id, {Id, Counter, State, StoreTable, KBuckets}};
 %Funzione cancellabile?
 handle_call({read_store, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received read_store request from ~p,~p~n", [_From, Id]),
+    %io:format("Received read_store request from ~p,~p~n", [_From, Id]),
     % Leggi la tabella ETS
     Tuples = ets:tab2list(StoreTable),
-    io:format("Table content: ~p~n", [Tuples]),
+    %io:format("Table content: ~p~n", [Tuples]),
     {reply, {Tuples, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(
     {find_node, ToFindNodeId, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
 ) ->
     {PID, _} = _From,
-    io:format("Node ~p (~p) received FIND_NODE request for ID ~p from ~p~n", [
-        self(), Id, ToFindNodeId, PID
-    ]),
+    %io:format("Node ~p (~p) received FIND_NODE request for ID ~p from ~p~n", [
+    %    self(), Id, ToFindNodeId, PID
+    %]),
     % 1. Recupera i k-bucket dalla tabella ETS
     KBucketsList = ets:tab2list(KBuckets),
     % 2. Implementa la logica per trovare i nodi più vicini
@@ -135,13 +137,14 @@ handle_call(
     {reply, {found_nodes, ClosestNodes, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call({find_value, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {PID, _} = _From,
-    io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
-        self(), Id, Key, PID
-    ]),
-    [{Key, Value}] = ets:lookup(StoreTable, Key),
+    %io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
+    %    self(), Id, Key, PID
+    %]),
+    %[{Key, Value}] = ets:lookup(StoreTable, Key),
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
+            %io:format("Nodo ~p trova il valore ~p", [self(), Key]),
             {reply, {found_value, Value, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
         %PID ! {found_value, Value};
         [] ->
@@ -156,18 +159,18 @@ handle_call(
     {join_request, IdNewNode, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
 ) ->
     {PID, _} = _From,
-    io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PID]),
+    %io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PID]),
 
     % Calcolo la distanza tra il mio ID e l'ID del NewNode
     Distanza = calcola_distanza(Id, IdNewNode),
 
     % Ottengo il giusto intervallo del k-bucket
     RightKbucket = get_right_bucket_interval(Distanza, KBuckets),
-    io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
+    %io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
 
     % Recupera il contenuto corrente del k-bucket
     [{Key, CurrentNodes}] = ets:lookup(KBuckets, RightKbucket),
-    io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
+    %io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
 
     %aggiungo in coda
     UpdatedNodes = CurrentNodes ++ [{PID, IdNewNode}],
@@ -191,11 +194,11 @@ handle_call(
     % invia i miei k-buckets
     {reply, {k_buckets, KBuckets, Id, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(_Request, _From, State) ->
-    io:format("Received unknown request: ~p~n", [_Request]),
+    %io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
 
 handle_cast({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
+    %io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
     % Incrementa il contatore
     NewCounter = Counter + 1,
     %Calcola la key
@@ -203,16 +206,16 @@ handle_cast({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
     Key = binary_to_integer_representation(HashValue),
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
+    %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
     % Rispondi al client
     {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
 handle_cast({store, Key, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
-    io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
+    %io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
     % Incrementa il contatore
     NewCounter = Counter + 1,
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
+    %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
     % Rispondi al client
     {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
 handle_cast(republish, {Id, Counter, State, StoreTable, KBuckets}) ->
@@ -307,18 +310,18 @@ initialize_kbuckets(KBuckets) ->
 
 calcola_distanza(Id1, Id2) ->
     Distanza = Id1 bxor Id2,
-    io:format("La distanza calcolata è: ~p ~n", [Distanza]),
+    %io:format("La distanza calcolata è: ~p ~n", [Distanza]),
     Distanza.
 
 find_closest_nodes(Key, KBuckets) ->
     %Controllare che sia un ID quindi fare check del formato
     % 1. Ottieni tutti i nodi dai k-buckets.
     Nodi = get_all_nodes_from_kbuckets(KBuckets),
-    io:format("Nodi estratti: ~p~n", [Nodi]),
+    %io:format("Nodi estratti: ~p~n", [Nodi]),
 
     % 2. Calcola la distanza di ogni nodo rispetto a ToFindNodeId
     NodiConDistanza = aggiungi_distanza(Nodi, Key),
-    io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
+    %io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
 
     % NodiConDistanzaNo0 = lists:filter(fun({_, _, X}) -> X =/= 0 end, NodiConDistanza),
     % io:format("Nodi con distanza senza 0: ~p~n", [NodiConDistanzaNo0]),
@@ -327,7 +330,7 @@ find_closest_nodes(Key, KBuckets) ->
     NodiOrdinati = lists:sort(
         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
     ),
-    io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
+    %io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
 
     % 4. Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
     KClosestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
@@ -335,7 +338,7 @@ find_closest_nodes(Key, KBuckets) ->
         fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, KClosestNodesWithDistance
     ),
 
-    io:format("Nodi più vicini (limitati a K e senza distanza): ~p~n", [KClosestNodes]),
+    %io:format("Nodi più vicini (limitati a K e senza distanza): ~p~n", [KClosestNodes]),
     KClosestNodes.
 
 get_all_nodes_from_kbuckets(BucketsList) ->
@@ -372,18 +375,18 @@ binary_to_integer_representation(Binary) ->
     lists:foldl(fun(Byte, Acc) -> (Acc bsl 8) bor Byte end, 0, Bytes).
 
 add_bootstrap_node_in_kbuckets(BootstrapPID, KBuckets, Id, BootstrapID) ->
-    io:format("Il bootstrap id è: ~p~n", [BootstrapID]),
+    %io:format("Il bootstrap id è: ~p~n", [BootstrapID]),
 
     % Calcolo la distanza tra il mio ID e l'ID del BootstrapNode
     Distanza = calcola_distanza(Id, BootstrapID),
 
     % Ottengo il giusto intervallo del k-bucket
     RightKbucket = get_right_bucket_interval(Distanza, KBuckets),
-    io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
+    %io:format("Il kbucket giusto è: ~p~n", [RightKbucket]),
 
     % Recupera il contenuto corrente del k-bucket
     [{Key, CurrentNodes}] = ets:lookup(KBuckets, RightKbucket),
-    io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
+    %io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
 
     %aggiungo in coda
     UpdatedNodes = CurrentNodes ++ [{BootstrapPID, BootstrapID}],
@@ -423,7 +426,7 @@ republish_data(StoreTable, KBuckets) ->
             % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
             lists:foreach(
                 fun({NodePID, NodeId}) ->
-                    io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
+                    %io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
                     % Invia la richiesta STORE in modo asincrono (cast) per non bloccare il processo di ripubblicazione
                     %NodePID ! {store, Key, Value}
                     store(NodePID, Key, Value)
@@ -439,7 +442,7 @@ republish_data(StoreTable, KBuckets) ->
 %io:format("Ripubblicazione dati completata per il nodo con pid: ~p\n", [self()]).
 
 add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
-    io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, BucketsReceived]),
+    %io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, BucketsReceived]),
     % 1. Converte la tabella ETS dei buckets in una lista
     BucketsReceivedList = ets:tab2list(BucketsReceived),
 
@@ -462,11 +465,11 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
 
                             % Recupera i nodi attualmente presenti nel bucket corretto
                             case RightKbucket of
-                                false ->
-                                    io:format(
-                                        "+++++ ERRORE: nessun bucket trovato per la distanza ~p (nodo ~p)~n",
-                                        [Distanza, NodeId]
-                                    );
+                                %false ->
+                                % io:format(
+                                %     "+++++ ERRORE: nessun bucket trovato per la distanza ~p (nodo ~p)~n",
+                                %     [Distanza, NodeId]
+                                % );
                                 {_, _} ->
                                     [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
 
@@ -475,21 +478,21 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
                                         case lists:keyfind(NodeId, 2, CurrentNodes) of
                                             % Non trovato, lo aggiunge
                                             false ->
-                                                io:format(
-                                                    "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
-                                                    [
-                                                        NodePid, NodeId, RightKbucket
-                                                    ]
-                                                ),
+                                                % io:format(
+                                                %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
+                                                %     [
+                                                %         NodePid, NodeId, RightKbucket
+                                                %     ]
+                                                % ),
                                                 CurrentNodes ++ [{NodePid, NodeId}];
                                             % Già presente, non fare nulla
                                             _ ->
-                                                io:format(
-                                                    "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
-                                                    [
-                                                        NodePid, NodeId, RightKbucket
-                                                    ]
-                                                ),
+                                                % io:format(
+                                                %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
+                                                %     [
+                                                %         NodePid, NodeId, RightKbucket
+                                                %     ]
+                                                % ),
                                                 CurrentNodes
                                         end,
 
@@ -513,82 +516,102 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
         BucketsReceivedList
     ).
 
+find_value_iterative(NodePID, Key) ->
+    find_value_iterative(NodePID, Key, [], []).
+
 find_value_iterative(NodePID, Key, TriedNodes, ClosestNodes) ->
-    io:format("Interrogazione del nodo ~p per la chiave ~p\n", [NodePID, Key]),
-    case catch gen_server:call(NodePID, {find_value, Key}, 5000) of
+    %io:format("Interrogazione del nodo ~p per la chiave ~p\n", [NodePID, Key]),
+
+    RequestId = generate_requestId(),
+    case catch gen_server:call(NodePID, {find_value, Key, RequestId}, 2000) of
         {'EXIT', _} ->
-            io:format("Il nodo ~p non risponde\n", [NodePID]),
+            %io:format("Il nodo ~p non risponde\n", [NodePID]),
             handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes);
-        {found_value, Value} ->
-            io:format("Valore ~p trovato sul nodo ~p\n", [Value, NodePID]),
+        {found_value, Value, RequestId} ->
+            %io:format("Valore ~p trovato sul nodo ~p\n", [Value, NodePID]),
             {ok, Value};
-        {found_nodes, Nodes} ->
-            NewNodes = lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, Nodes),
+        {found_nodes, Nodes, RequestId} ->
+            %Trasformare qui la lista di tuple in lista pid
+            NodesPIDList = lists:map(
+                fun({PIDNodo, _}) ->
+                    PIDNodo
+                end,
+                Nodes
+            ),
+            NewNodes = lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, NodesPIDList),
             case NewNodes of
                 [] ->
                     %%Nessun nuovo nodo da interrogare
-                    case ClosestNodes of
-                        [] ->
-                            %% Non ci sono nodi vicini, la ricerca fallisce
-                            io:format("Nessun nodo trovato vicino alla chiave ~p\n", [Key]),
-                            {error, not_found};
-                        _ ->
-                            io:format("Nodi piu' vicini trovati: ~p\n", [ClosestNodes]),
-                            {error, not_found}
-                    end;
+                    % io:format(
+                    %     "Valore non trovato, nessun nuovo nodo da interrogare vicino alla chiave ~p\n",
+                    %     [Key]
+                    % ),
+                    {error, not_found};
+                % case ClosestNodes of
+                %     [] ->
+                %         %% Non ci sono nodi vicini, la ricerca fallisce
+                %         io:format("Nessun nodo trovato vicino alla chiave ~p\n", [Key]),
+                %         {error, not_found};
+                %     _ ->
+                %         io:format("Nessun valore trovato, ultimi nodi testati: ~p\n", [
+                %             ClosestNodes
+                %         ]),
+                %         %io:format("Nodi piu' vicini trovati: ~p\n", [ClosestNodes]),
+                %         {error, not_found}
+                % end;
                 _ ->
                     %%Interroga il nodo più vicino (il primo nella lista)
-                    NextNode = hd(NewNodes),
-                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], NewNodes)
+                    NextNodePID = hd(NewNodes),
+                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], NewNodes)
             end;
         _ ->
-            io:format("Risposta inattesa dal nodo ~p\n", [NodePID]),
+            %io:format("Risposta inattesa dal nodo ~p\n", [NodePID]),
             handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes)
     end.
 
 handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes) ->
-    % Implementa la logica per gestire il fallimento di un nodo.
-    % Puoi provare a interrogare un altro nodo vicino o segnalare un errore.
-    io:format("Gestione del fallimento del nodo ~p\n", [NodePID]),
+    %io:format("Gestione del fallimento del nodo ~p\n", [NodePID]),
     case ClosestNodes of
         [] ->
-            io:format("Ricerca fallita per la chiave ~p\n", [Key]),
+            %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
             {error, not_found};
         _ ->
             % Prova con un altro nodo dai nodi più vicini
             case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
                 [] ->
                     % Nessun altro nodo disponibile
-                    io:format(
-                        "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
-                    ),
+                    % io:format(
+                    %     "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
+                    % ),
                     {error, not_found};
                 [NextNode | _] ->
-                    io:format("Riprova con il nodo ~p\n", [NextNode]),
-                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], ClosestNodes)
+                    %io:format("Riprova con il nodo ~p\n", [NextNode]),
+                    NextNodePID = NextNode,
+                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], ClosestNodes)
             end
     end.
 
 handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes) ->
     % Implementa la logica per gestire una risposta inattesa da un nodo.
     % Puoi registrare l'evento, riprovare o segnalare un errore.
-    io:format("Gestione di una risposta inattesa dal nodo ~p\n", [NodePID]),
+    %io:format("Gestione di una risposta inattesa dal nodo ~p\n", [NodePID]),
     case ClosestNodes of
         [] ->
-            io:format("Ricerca fallita per la chiave ~p\n", [Key]),
+            %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
             {error, not_found};
         _ ->
             % Prova con un altro nodo dai nodi più vicini
             case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
                 [] ->
                     % Nessun altro nodo disponibile
-                    io:format(
-                        "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
-                    ),
+                    % io:format(
+                    %     "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
+                    % ),
                     {error, not_found};
                 [NextNode | _] ->
-                    io:format("Riprova con il nodo ~p\n", [NextNode]),
-                    find_value_iterative(NextNode, Key, [NodePID | TriedNodes], ClosestNodes)
+                    %io:format("Riprova con il nodo ~p\n", [NextNode]),
+                    NextNodePID = NextNode,
+                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], ClosestNodes)
             end
     end.
 
@@ -602,65 +625,40 @@ reiterate_find_node(Key, NodePID, BestNodes, Tries) ->
         _ ->
             RequestId = generate_requestId(),
             case gen_server:call(NodePID, {find_node, Key, RequestId}, timer:seconds(2)) of
-                {found_nodes, ClosestNodes, RequestId} when is_list(ClosestNodes) ->
-                    case ClosestNodes of
-                        [] ->
-                            io:format("Nessun nodo vicino trovato, ricerca conclusa.~n", []),
-                            {ok, BestNodes};
-                        _ ->
-                            % Calcola le distanze dai nodi trovati alla chiave
-                            NodesWithDistance = lists:map(
-                                fun({Pid, Id}) ->
-                                    Distance = calcola_distanza(Key, Id),
-                                    {Pid, Id, Distance}
-                                end,
-                                ClosestNodes
-                            ),
-                            % Ordina i nodi per distanza crescente
-                            NewBestNodes = lists:sort(
-                                fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end, NodesWithDistance
-                            ),
-
-                            case BestNodes == [] of
-                                %Caso base
-                                true ->
-                                    [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
-                                    case FirstNewBestNodesDistance == 0 of
-                                        true ->
-                                            % Ferma l'iterazione
-                                            io:format(
-                                                "Nodo con distanza 0 trovato, ricerca conclusa.~n"
-                                            ),
-                                            NewBestNodesNoDistance = lists:map(
-                                                fun({PIDNodo, IdNodo, _}) ->
-                                                    {PIDNodo, IdNodo}
-                                                end,
-                                                NewBestNodes
-                                            ),
-                                            {ok, NewBestNodesNoDistance};
-                                        _ ->
-                                            % Se ci sono nodi migliori, continua l'iterazione
-                                            io:format(
-                                                "Trovati nodi più vicini, si continua l'iterazione.~n"
-                                            ),
-                                            [{NewNodePID, _, _} | _] = NewBestNodes,
-                                            %timer:sleep(1000),
-                                            reiterate_find_node(
-                                                Key, NewNodePID, NewBestNodes, Tries + 1
-                                            )
-                                    end;
+                {found_nodes, ClosestNodes, ReceivedRequestId} when is_list(ClosestNodes) ->
+                    case RequestId == ReceivedRequestId of
+                        true ->
+                            case ClosestNodes of
+                                [] ->
+                                    % io:format(
+                                    %     "Nessun nodo vicino trovato, ricerca conclusa.~n", []
+                                    % ),
+                                    {ok, BestNodes};
                                 _ ->
-                                    [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
-                                    [{_, _, FirstBestNodesDistance} | _] = BestNodes,
-                                    % Confronta i nuovi nodi con i migliori precedenti
-                                    case FirstNewBestNodesDistance < FirstBestNodesDistance of
+                                    % Calcola le distanze dai nodi trovati alla chiave
+                                    NodesWithDistance = lists:map(
+                                        fun({Pid, Id}) ->
+                                            Distance = calcola_distanza(Key, Id),
+                                            {Pid, Id, Distance}
+                                        end,
+                                        ClosestNodes
+                                    ),
+                                    % Ordina i nodi per distanza crescente
+                                    NewBestNodes = lists:sort(
+                                        fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end,
+                                        NodesWithDistance
+                                    ),
+
+                                    case BestNodes == [] of
+                                        %Caso base
                                         true ->
+                                            [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
                                             case FirstNewBestNodesDistance == 0 of
                                                 true ->
-                                                    % Altrimenti, ferma l'iterazione
-                                                    io:format(
-                                                        "Nodo con distanza 0 trovato, ricerca conclusa.~n"
-                                                    ),
+                                                    % Ferma l'iterazione
+                                                    % io:format(
+                                                    %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+                                                    % ),
                                                     NewBestNodesNoDistance = lists:map(
                                                         fun({PIDNodo, IdNodo, _}) ->
                                                             {PIDNodo, IdNodo}
@@ -670,9 +668,9 @@ reiterate_find_node(Key, NodePID, BestNodes, Tries) ->
                                                     {ok, NewBestNodesNoDistance};
                                                 _ ->
                                                     % Se ci sono nodi migliori, continua l'iterazione
-                                                    io:format(
-                                                        "Trovati nodi più vicini, si continua l'iterazione.~n"
-                                                    ),
+                                                    % io:format(
+                                                    %     "Trovati nodi più vicini, si continua l'iterazione.~n"
+                                                    % ),
                                                     [{NewNodePID, _, _} | _] = NewBestNodes,
                                                     %timer:sleep(1000),
                                                     reiterate_find_node(
@@ -680,47 +678,218 @@ reiterate_find_node(Key, NodePID, BestNodes, Tries) ->
                                                     )
                                             end;
                                         _ ->
-                                            % Altrimenti, ferma l'iterazione
-                                            io:format(
-                                                "Nessun nodo più vicino trovato, ricerca conclusa.~n"
-                                            ),
-                                            %Elimino la distanza
-                                            BestNodesNoDistance = lists:map(
-                                                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end,
-                                                BestNodes
-                                            ),
-                                            {ok, BestNodesNoDistance}
+                                            [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
+                                            [{_, _, FirstBestNodesDistance} | _] = BestNodes,
+                                            % Confronta i nuovi nodi con i migliori precedenti
+                                            case
+                                                FirstNewBestNodesDistance < FirstBestNodesDistance
+                                            of
+                                                true ->
+                                                    case FirstNewBestNodesDistance == 0 of
+                                                        true ->
+                                                            % Altrimenti, ferma l'iterazione
+                                                            % io:format(
+                                                            %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+                                                            % ),
+                                                            NewBestNodesNoDistance = lists:map(
+                                                                fun({PIDNodo, IdNodo, _}) ->
+                                                                    {PIDNodo, IdNodo}
+                                                                end,
+                                                                NewBestNodes
+                                                            ),
+                                                            {ok, NewBestNodesNoDistance};
+                                                        _ ->
+                                                            % Se ci sono nodi migliori, continua l'iterazione
+                                                            % io:format(
+                                                            %     "Trovati nodi più vicini, si continua l'iterazione.~n"
+                                                            % ),
+                                                            [{NewNodePID, _, _} | _] = NewBestNodes,
+                                                            %timer:sleep(1000),
+                                                            reiterate_find_node(
+                                                                Key,
+                                                                NewNodePID,
+                                                                NewBestNodes,
+                                                                Tries + 1
+                                                            )
+                                                    end;
+                                                _ ->
+                                                    % Altrimenti, ferma l'iterazione
+                                                    % io:format(
+                                                    %     "Nessun nodo più vicino trovato, ricerca conclusa.~n"
+                                                    % ),
+                                                    %Elimino la distanza
+                                                    BestNodesNoDistance = lists:map(
+                                                        fun({PIDNodo, IdNodo, _}) ->
+                                                            {PIDNodo, IdNodo}
+                                                        end,
+                                                        BestNodes
+                                                    ),
+                                                    {ok, BestNodesNoDistance}
+                                            end
                                     end
-                            end
+                            end;
+                        _ ->
+                            %io:format("RequestId ricevuto non corretto~n"),
+                            {ok, BestNodes}
                     end;
                 {error, Reason} ->
-                    io:format("Errore durante find_node: ~p~n", [Reason]),
+                    %io:format("Errore durante find_node: ~p~n", [Reason]),
                     timer:sleep(1000),
                     reiterate_find_node(Key, NodePID, BestNodes, Tries + 1);
                 Other ->
-                    io:format("Risposta non gestita da find_node: ~p~n", [Other]),
+                    %io:format("Risposta non gestita da find_node: ~p~n", [Other]),
                     timer:sleep(1000),
                     reiterate_find_node(Key, NodePID, BestNodes, Tries + 1)
             end
     end.
 
-% % Funzione per confrontare due liste di nodi e verificare se la nuova lista contiene nodi più vicini
-% sono_migliori(NewNodes, BestNodes) ->
-%     case {[NewNodes], [BestNodes]} of
-%         % Nessun nodo in entrambe le liste
-%         {[], []} ->
-%             false;
-%         % Nessun nuovo nodo, quindi non sono migliori
-%         {[], _} ->
-%             false;
-%         % Ci sono nuovi nodi e nessun nodo precedente, quindi sono migliori
-%         {_, []} ->
-%             true;
+%Funzione da testare per avere meno righe di codice
+% reiterate_find_node2(Key, NodePID, BestNodes, Tries) ->
+%     case Tries > 10 of
+%         true ->
+%             {error, max_retries_reached};
 %         _ ->
-%             % Confronta la distanza del nodo più vicino nelle due liste
-%             {_, _, NewDistance} = lists:nth(1, NewNodes),
-%             case lists:keysearch(1, 1, BestNodes) of
-%                 false -> true;
-%                 {_, _, BestDistance} -> NewDistance < BestDistance
+%             RequestId = generate_requestId(),
+%             case gen_server:call(NodePID, {find_node, Key, RequestId}, timer:seconds(2)) of
+%                 {found_nodes, ClosestNodes, ReceivedRequestId} when
+%                     RequestId == ReceivedRequestId
+%                 ->
+%                     NodesWithDistance = lists:map(
+%                         fun({Pid, Id}) -> {Pid, Id, calcola_distanza(Key, Id)} end, ClosestNodes
+%                     ),
+%                     NewBestNodes = lists:sort(
+%                         fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end, NodesWithDistance
+%                     ),
+%                     case hd(NewBestNodes) of
+%                         {_, _, 0} ->
+%                             io:format("Nodo con distanza 0 trovato, ricerca conclusa.~n"),
+%                             {ok, lists:map(fun({Pid, Id, _}) -> {Pid, Id} end, NewBestNodes)};
+%                         _ ->
+%                             case BestNodes == [] orelse hd(NewBestNodes) < hd(BestNodes) of
+%                                 true ->
+%                                     io:format(
+%                                         "Trovati nodi più vicini, si continua l'iterazione.~n"
+%                                     ),
+%                                     [{NewNodePID, _, _} | _] = NewBestNodes,
+%                                     reiterate_find_node(Key, NewNodePID, NewBestNodes, Tries + 1);
+%                                 _ ->
+%                                     io:format(
+%                                         "Nessun nodo più vicino trovato, ricerca conclusa.~n"
+%                                     ),
+%                                     {ok, lists:map(fun({Pid, Id, _}) -> {Pid, Id} end, BestNodes)}
+%                             end
+%                     end;
+%                 {error, Reason} ->
+%                     io:format("Errore durante find_node: ~p~n", [Reason]),
+%                     timer:sleep(1000),
+%                     reiterate_find_node(Key, NodePID, BestNodes, Tries + 1);
+%                 Other ->
+%                     io:format("Risposta non gestita da find_node: ~p~n", [Other]),
+%                     timer:sleep(1000),
+%                     reiterate_find_node(Key, NodePID, BestNodes, Tries + 1)
 %             end
 %     end.
+
+%% Avvia più nodi Kademlia
+start_nodes(NumNodes) ->
+    start_nodes(NumNodes, {}).
+
+start_nodes(0, _) ->
+    ok;
+start_nodes(NumNodes, BootstrapNode) ->
+    Name = list_to_atom("knode_" ++ integer_to_list(NumNodes)),
+    case BootstrapNode of
+        % Primo nodo, diventa bootstrap
+        {} ->
+            start_link(Name, undefined),
+
+            start_nodes(NumNodes - 1, {Name, whereis(Name)});
+        % Nodi successivi, si connettono al bootstrap
+        {NameBootstrap, BootstrapNodePID} ->
+            start_link(Name, BootstrapNodePID),
+            start_nodes(NumNodes - 1, {NameBootstrap, BootstrapNodePID})
+    end.
+
+%% Funzione per misurare il tempo di lookup
+% measure_lookup_time(NumLookups) ->
+%     measure_lookup_time(NumLookups, 0, 0).
+
+% measure_lookup_time(0, TotalTime, NumSuccess) ->
+%     case NumSuccess of
+%         0 ->
+%             {error, "Nessun lookup completato con successo"};
+%         _ ->
+%             AverageTime = TotalTime / NumSuccess,
+%             {ok, AverageTime}
+%     end;
+% measure_lookup_time(NumLookups, TotalTime, NumSuccess) ->
+%     Key = generate_random_key(), % Genera una chiave casuale
+%     {Time, Result} = timer:tc(fun() -> knode:lookup(Key) end), %Misura il tempo di esecuzione della lookup
+%     case Result of
+%         {ok, _Value} -> %Lookup avuto successo
+%             measure_lookup_time(NumLookups - 1, TotalTime + Time, NumSuccess + 1);
+%         {error, _Reason} -> %Gestisci l'errore, ad esempio nodo non trovato
+%             io:format("Lookup fallito per la chiave ~p~n", [Key]),
+%             measure_lookup_time(NumLookups - 1, TotalTime, NumSuccess) %Riprova senza sommare il tempo
+%     end.
+
+% measure_lookup_average_time(ValoreDaTrovare,TotalTime) ->
+%     NumNodes = 500,
+%     ListOfNodes = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
+%     lists:foreach(
+%         fun(NomeNodo) ->
+%             {Time, Result} = timer:tc(fun() ->
+%                 knode:find_value_iterative(whereis(NomeNodo), ValoreDaTrovare)end),
+%                 case Result of
+%                     %Lookup avuto successo
+%                     {ok, _Value} ->
+
+%                     %Gestisci l'errore, ad esempio nodo non trovato
+%                     {error, _Reason} ->
+%                         io:format("Lookup fallito per la chiave ~p~n", [Key]),
+%                         %Riprova senza sommare il tempo
+%                 end
+
+%         end,
+%         ListOfNodes
+%     ).
+
+% calcola_tempo_totale(Key) ->
+%     NumNodes = 500,
+%     ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
+%     [ {Node, Tempo} ||
+%       Node <- ListaNodi,
+%       Inizio = erlang:monotonic_time(microsecond),
+%       Risultato = find_value_iterative(Node, Key),
+%       case Risultato of
+%         {ok, _} ->
+%           Tempo = erlang:monotonic_time(microsecond) - Inizio,
+%           true;
+%         _ ->
+%           false
+%       end ].
+
+calcola_tempo_totale(Key) ->
+    NumNodes = 500,
+    ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
+    NodiETempi = [
+        {Node, Tempo}
+     || Node <- ListaNodi,
+        {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
+    ],
+    Tempi = [Tempo || {_, Tempo} <- NodiETempi],
+    Media = lists:sum(Tempi) / length(Tempi),
+    io:format("Media dei tempi: ~p~n", [Media]),
+    lists:foreach(
+        fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
+    ).
+
+calcola_tempo(Node, Key) ->
+    Inizio = erlang:monotonic_time(microsecond),
+    Risultato = find_value_iterative(Node, Key),
+    Fine = erlang:monotonic_time(microsecond),
+    Tempo = Fine - Inizio,
+    case Risultato of
+        {ok, Value} -> {ok, Value, Tempo};
+        _ -> false
+    end.
