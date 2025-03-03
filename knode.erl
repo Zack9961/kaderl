@@ -2,7 +2,8 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 20).
--define(T, 30).
+-define(T, 20).
+-define(A, 3).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
     stop/0,
@@ -15,7 +16,8 @@
     reiterate_find_node/2,
     reiterate_find_node/4,
     start_nodes/1,
-    calcola_tempo_totale/1
+    calcola_tempo_totale/1,
+    find_value_parallel/2
 ]).
 
 start_link(Name, BootstrapNode) ->
@@ -47,7 +49,7 @@ init(State) ->
                     BootstrapNodePID, {join_request, Id, RequestId}, 2000
                 )
             of
-                {'EXIT', Reason} ->
+                {'EXIT', _} ->
                     % Nodo bootstrap non raggiungibile, divento bootstrap
                     % io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
                     %     BootstrapNodePID, Reason
@@ -115,6 +117,12 @@ handle_call({ping, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
     {reply, {pong, self(), RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     {reply, Id, {Id, Counter, State, StoreTable, KBuckets}};
+handle_call({get_alpha_nodes, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+    KBucketsList = ets:tab2list(KBuckets),
+    KClosestNodes = find_closest_nodes(Key, KBucketsList),
+    AlphaClosestNodes = lists:sublist(KClosestNodes, ?A),
+    {reply, {alpha_nodes, AlphaClosestNodes, RequestId},
+        {Id, Counter, State, StoreTable, KBuckets}};
 %Funzione cancellabile?
 handle_call({read_store, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
     %io:format("Received read_store request from ~p,~p~n", [_From, Id]),
@@ -519,99 +527,58 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
 find_value_iterative(NodePID, Key) ->
     find_value_iterative(NodePID, Key, [], []).
 
-find_value_iterative(NodePID, Key, TriedNodes, ClosestNodes) ->
-    %io:format("Interrogazione del nodo ~p per la chiave ~p\n", [NodePID, Key]),
-
+find_value_iterative(NodePID, Key, TriedNodes, NotTriedNodes) ->
     RequestId = generate_requestId(),
     case catch gen_server:call(NodePID, {find_value, Key, RequestId}, 2000) of
-        {'EXIT', _} ->
-            %io:format("Il nodo ~p non risponde\n", [NodePID]),
-            handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes);
         {found_value, Value, RequestId} ->
-            %io:format("Valore ~p trovato sul nodo ~p\n", [Value, NodePID]),
             {ok, Value};
-        {found_nodes, Nodes, RequestId} ->
-            %Trasformare qui la lista di tuple in lista pid
-            NodesPIDList = lists:map(
+        {found_nodes, FoundedNodes, RequestId} ->
+            %Trasformo la lista di tuple in lista di pid
+
+            FoundedNodesPID = lists:map(
                 fun({PIDNodo, _}) ->
                     PIDNodo
                 end,
-                Nodes
+                FoundedNodes
             ),
-            NewNodes = lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, NodesPIDList),
-            case NewNodes of
+
+            NewNotTriedNodes = lists:filter(
+                fun(N) ->
+                    not lists:member(N, TriedNodes)
+                end,
+                FoundedNodesPID
+            ),
+            case NewNotTriedNodes of
                 [] ->
-                    %%Nessun nuovo nodo da interrogare
-                    % io:format(
-                    %     "Valore non trovato, nessun nuovo nodo da interrogare vicino alla chiave ~p\n",
-                    %     [Key]
-                    % ),
                     {error, not_found};
-                % case ClosestNodes of
-                %     [] ->
-                %         %% Non ci sono nodi vicini, la ricerca fallisce
-                %         io:format("Nessun nodo trovato vicino alla chiave ~p\n", [Key]),
-                %         {error, not_found};
-                %     _ ->
-                %         io:format("Nessun valore trovato, ultimi nodi testati: ~p\n", [
-                %             ClosestNodes
-                %         ]),
-                %         %io:format("Nodi piu' vicini trovati: ~p\n", [ClosestNodes]),
-                %         {error, not_found}
-                % end;
                 _ ->
                     %%Interroga il nodo più vicino (il primo nella lista)
-                    NextNodePID = hd(NewNodes),
-                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], NewNodes)
+                    NextNodePID = hd(NewNotTriedNodes),
+                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], NewNotTriedNodes)
             end;
         _ ->
-            %io:format("Risposta inattesa dal nodo ~p\n", [NodePID]),
-            handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes)
-    end.
-
-handle_node_failure(NodePID, Key, TriedNodes, ClosestNodes) ->
-    %io:format("Gestione del fallimento del nodo ~p\n", [NodePID]),
-    case ClosestNodes of
-        [] ->
-            %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
-            {error, not_found};
-        _ ->
-            % Prova con un altro nodo dai nodi più vicini
-            case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
+            case NotTriedNodes of
                 [] ->
-                    % Nessun altro nodo disponibile
-                    % io:format(
-                    %     "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
-                    % ),
+                    %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
                     {error, not_found};
-                [NextNode | _] ->
-                    %io:format("Riprova con il nodo ~p\n", [NextNode]),
-                    NextNodePID = NextNode,
-                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], ClosestNodes)
-            end
-    end.
-
-handle_unexpected_response(NodePID, Key, TriedNodes, ClosestNodes) ->
-    % Implementa la logica per gestire una risposta inattesa da un nodo.
-    % Puoi registrare l'evento, riprovare o segnalare un errore.
-    %io:format("Gestione di una risposta inattesa dal nodo ~p\n", [NodePID]),
-    case ClosestNodes of
-        [] ->
-            %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
-            {error, not_found};
-        _ ->
-            % Prova con un altro nodo dai nodi più vicini
-            case tl(lists:filter(fun(N) -> not lists:member(N, TriedNodes) end, ClosestNodes)) of
-                [] ->
-                    % Nessun altro nodo disponibile
-                    % io:format(
-                    %     "Nessun altro nodo disponibile, ricerca fallita per la chiave ~p\n", [Key]
-                    % ),
-                    {error, not_found};
-                [NextNode | _] ->
-                    %io:format("Riprova con il nodo ~p\n", [NextNode]),
-                    NextNodePID = NextNode,
-                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], ClosestNodes)
+                _ ->
+                    % Prova con un altro nodo dai nodi più vicini
+                    case
+                        tl(
+                            lists:filter(
+                                fun(N) -> not lists:member(N, TriedNodes) end, NotTriedNodes
+                            )
+                        )
+                    of
+                        [] ->
+                            {error, not_found};
+                        [NextNode | _] ->
+                            %io:format("Riprova con il nodo ~p\n", [NextNode]),
+                            NextNodePID = NextNode,
+                            find_value_iterative(
+                                NextNodePID, Key, [NodePID | TriedNodes], NotTriedNodes
+                            )
+                    end
             end
     end.
 
@@ -810,67 +777,8 @@ start_nodes(NumNodes, BootstrapNode) ->
             start_nodes(NumNodes - 1, {NameBootstrap, BootstrapNodePID})
     end.
 
-%% Funzione per misurare il tempo di lookup
-% measure_lookup_time(NumLookups) ->
-%     measure_lookup_time(NumLookups, 0, 0).
-
-% measure_lookup_time(0, TotalTime, NumSuccess) ->
-%     case NumSuccess of
-%         0 ->
-%             {error, "Nessun lookup completato con successo"};
-%         _ ->
-%             AverageTime = TotalTime / NumSuccess,
-%             {ok, AverageTime}
-%     end;
-% measure_lookup_time(NumLookups, TotalTime, NumSuccess) ->
-%     Key = generate_random_key(), % Genera una chiave casuale
-%     {Time, Result} = timer:tc(fun() -> knode:lookup(Key) end), %Misura il tempo di esecuzione della lookup
-%     case Result of
-%         {ok, _Value} -> %Lookup avuto successo
-%             measure_lookup_time(NumLookups - 1, TotalTime + Time, NumSuccess + 1);
-%         {error, _Reason} -> %Gestisci l'errore, ad esempio nodo non trovato
-%             io:format("Lookup fallito per la chiave ~p~n", [Key]),
-%             measure_lookup_time(NumLookups - 1, TotalTime, NumSuccess) %Riprova senza sommare il tempo
-%     end.
-
-% measure_lookup_average_time(ValoreDaTrovare,TotalTime) ->
-%     NumNodes = 500,
-%     ListOfNodes = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
-%     lists:foreach(
-%         fun(NomeNodo) ->
-%             {Time, Result} = timer:tc(fun() ->
-%                 knode:find_value_iterative(whereis(NomeNodo), ValoreDaTrovare)end),
-%                 case Result of
-%                     %Lookup avuto successo
-%                     {ok, _Value} ->
-
-%                     %Gestisci l'errore, ad esempio nodo non trovato
-%                     {error, _Reason} ->
-%                         io:format("Lookup fallito per la chiave ~p~n", [Key]),
-%                         %Riprova senza sommare il tempo
-%                 end
-
-%         end,
-%         ListOfNodes
-%     ).
-
-% calcola_tempo_totale(Key) ->
-%     NumNodes = 500,
-%     ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
-%     [ {Node, Tempo} ||
-%       Node <- ListaNodi,
-%       Inizio = erlang:monotonic_time(microsecond),
-%       Risultato = find_value_iterative(Node, Key),
-%       case Risultato of
-%         {ok, _} ->
-%           Tempo = erlang:monotonic_time(microsecond) - Inizio,
-%           true;
-%         _ ->
-%           false
-%       end ].
-
 calcola_tempo_totale(Key) ->
-    NumNodes = 500,
+    NumNodes = 100,
     ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
     NodiETempi = [
         {Node, Tempo}
@@ -879,7 +787,9 @@ calcola_tempo_totale(Key) ->
     ],
     Tempi = [Tempo || {_, Tempo} <- NodiETempi],
     Media = lists:sum(Tempi) / length(Tempi),
+    Percentuale = (length(Tempi) / NumNodes) * 100,
     io:format("Media dei tempi: ~p~n", [Media]),
+    io:format("Percentuale nodi che hanno trovato il valore: ~p~n", [Percentuale]),
     lists:foreach(
         fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
     ).
@@ -893,3 +803,174 @@ calcola_tempo(Node, Key) ->
         {ok, Value} -> {ok, Value, Tempo};
         _ -> false
     end.
+
+% find_value_parallel(Key) ->
+%     Coordinator = spawn(fun() -> coordinator_loop(Key, self(), []) end),
+%     Coordinator.
+
+% coordinator_loop(Key, NodesToQuery, Caller, Results) ->
+%     Pids = [spawn(fun() -> worker_loop(Node, Key, Coordinator) end) || Node <- NodesToQuery],
+%     collect_responses(Pids, Caller, Results).
+
+% worker_loop(Node, Key, Coordinator) ->
+%     case knode:find_value_iterative(Node, Key) of
+%         {ok, Value} ->
+%             Coordinator ! {found, self(), {ok, Value}};
+%         {error, Reason} ->
+%             Coordinator ! {error, self(), Reason}
+%     end.
+
+% collect_responses(Pids, Caller, Results) ->
+%     receive
+%         {found, Pid, {ok, Value}} ->
+%             terminate_workers(lists:delete(Pid, Pids)),
+%             Caller ! {ok, Value},
+%             % Termina la ricerca non appena si trova il valore
+%             ok;
+%         {error, Pid, Reason} ->
+%             NewResults = [{error, Reason} | Results],
+%             case length(NewResults) >= ?A of
+%                 true ->
+%                     Caller ! {error, not_found},
+%                     % Termina se tutti i worker hanno dato errore
+%                     ok;
+%                 false ->
+%                     collect_responses(lists:delete(Pid, Pids), Caller, NewResults)
+%             end
+%     after 5000 ->
+%         Caller ! {error, timeout},
+%         % Termina la ricerca per timeout
+%         ok
+%     end.
+
+% terminate_workers(Pids) ->
+%     [exit(Pid, kill) || Pid <- Pids].
+
+%voglio mandare una richiesta al pid in modo
+%che prendo i suoi kbuckets per fare le richieste
+%in parallelo a loro
+find_value_parallel(NodePID, Key) ->
+    RequestId = generate_requestId(),
+    case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
+        {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
+            %Qui farò partire i miei threads
+            AlphaClosestNodesPID = lists:map(
+                fun({PIDNodo, _}) ->
+                    PIDNodo
+                end,
+                AlphaClosestNodes
+            ),
+            Self = self(),
+
+            Actors = [
+                spawn(fun() -> search_actor(Self, Node, Key) end)
+             || Node <- AlphaClosestNodesPID
+            ],
+
+            % Funzione per inviare il messaggio di stop a tutti gli attori
+            StopFun = fun(Actor) -> Actor ! stop end,
+
+            receive
+                {found, Key, Value, FromNode} ->
+                    io:format("Sono il parent, valore trovato"),
+                    % Trovato il valore: invia stop a tutti gli altri attori
+                    lists:foreach(StopFun, Actors),
+                    {ok, Value, FromNode}
+                % Timeout di 5 secondi
+            after 5000 ->
+                % Nessun valore trovato entro il timeout: invia stop e restituisci errore
+                lists:foreach(StopFun, Actors),
+                {error, not_found}
+            end;
+        _ ->
+            {error, not_found}
+    end.
+
+search_actor(Parent, Node, Key) ->
+    io:format("Chiedo al nodo ~p, il mi parent è: ~p, la key è:~p~n", [Node, Parent, Key]),
+    case knode:find_value_iterative(Node, Key) of
+        {ok, Value} ->
+            % Valore trovato: invia il messaggio al processo principale
+            io:format("Valore trovato, invio messaggio al parent..."),
+            Parent ! {found, Key, Value, Node};
+        {error, _} ->
+            % Valore non trovato: termina
+            ok
+    end.
+
+% find_value_parallel(NodePID, Key) ->
+%     RequestId = generate_requestId(),
+%     case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
+%         {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
+%             % Creazione di un processo "gestore"
+%             GestorePid = spawn(fun() -> gestore_risultati(length(AlphaClosestNodes), self(), []) end),
+
+%             % Avvio dei processi find_value_iterative (con monitoraggio)
+%             PidsRefs = avvia_ricerche(AlphaClosestNodes, Key, GestorePid),
+%             Pids = lists:map(fun({Pid, _Ref}) -> Pid end, PidsRefs),
+
+%             % Attesa del risultato o timeout
+%             receive
+%                 {valore_trovato, Valore} ->
+%                     % Funzione per terminare gli altri processi
+%                     kill_processi(Pids),
+%                     {ok, Valore};
+%                 timeout ->
+%                     kill_processi(Pids),
+%                     {error, timeout};
+%                 {'DOWN', _Ref, process, Pid, Reason} ->
+%                     io:format("Processo ~p terminato con motivo ~p~n", [Pid, Reason]),
+%                     kill_processi(Pids),
+%                     {error, not_found}
+%             after 5000 ->
+%                 kill_processi(Pids),
+%                 {error, timeout}
+%             end;
+%         _ ->
+%             {error, not_found}
+%     end.
+
+% avvia_ricerche(AlphaClosestNodes, Key, GestorePid) ->
+%     lists:map(
+%         fun({PIDNodo, _}) ->
+%             spawn_monitor(fun() ->
+%                 case knode:find_value_iterative(PIDNodo, Key) of
+%                     {ok, Valore} ->
+%                         io:format("Pippo~n"),
+
+%                         GestorePid ! {valore_trovato, Valore};
+%                     {error, not_found} ->
+%                         io:format("Pippo2~n"),
+
+%                         GestorePid ! not_found
+%                 end
+%             end)
+%         end,
+%         AlphaClosestNodes
+%     ).
+
+% gestore_risultati(0, Pid, _Acc) ->
+%     Pid ! timeout;
+% gestore_risultati(N, Pid, Acc) ->
+%     receive
+%         {valore_trovato, Valore} ->
+%             Pid ! {valore_trovato, Valore};
+%         not_found ->
+%             gestore_risultati(N - 1, Pid, Acc);
+%         _ ->
+%             %Ignora altri messaggi
+%             gestore_risultati(N - 1, Pid, Acc)
+%     end.
+
+% kill_processi(Pids) ->
+%     lists:foreach(
+%         fun(Pid) ->
+%             try
+%                 exit(Pid, kill)
+%             catch
+%                 %ignora se il processo è già terminato
+%                 error:noproc -> ok
+%             end
+%         end,
+%         Pids
+%     ).
