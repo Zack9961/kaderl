@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 20).
--define(T, 20).
+-define(T, 15).
 -define(A, 3).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
@@ -12,12 +12,13 @@
     find_node/3,
     find_value/3,
     ping/1,
-    find_value_iterative/2,
-    reiterate_find_node/2,
-    reiterate_find_node/4,
+    %find_value_iterative/2,
+    find_node_iterative/3,
+    % find_value_parallel/2,
+    % find_node_parallel/2,
     start_nodes/1,
-    calcola_tempo_totale/1,
-    find_value_parallel/2
+    %calcola_tempo_totale/1,
+    start_find_node_iterative/2
 ]).
 
 start_link(Name, BootstrapNode) ->
@@ -201,6 +202,21 @@ handle_call(
 
     % invia i miei k-buckets
     {reply, {k_buckets, KBuckets, Id, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+handle_call(
+    {start_find_node_iterative, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
+) ->
+    %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
+    KBucketsList = ets:tab2list(KBuckets),
+    ClosestNodes = find_closest_nodes(Key, KBucketsList),
+    %io:format("I nodi più vicini trovati sono:~p~n", [ClosestNodes]),
+    %Scelgo alpha nodi da interrogare in parallelo
+    AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
+
+    %Quindi faccio partire la funzione find_node_iterative
+    IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key, []),
+
+    {reply, {founded_nodes_from_iteration, IterativeNodesFound, RequestId},
+        {Id, Counter, State, StoreTable, KBuckets}};
 handle_call(_Request, _From, State) ->
     %io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
@@ -524,191 +540,191 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
         BucketsReceivedList
     ).
 
-find_value_iterative(NodePID, Key) ->
-    find_value_iterative(NodePID, Key, [], []).
+% find_value_iterative(NodePID, Key) ->
+%     find_value_iterative(NodePID, Key, [], []).
 
-find_value_iterative(NodePID, Key, TriedNodes, NotTriedNodes) ->
-    RequestId = generate_requestId(),
-    case catch gen_server:call(NodePID, {find_value, Key, RequestId}, 2000) of
-        {found_value, Value, RequestId} ->
-            {ok, Value};
-        {found_nodes, FoundedNodes, RequestId} ->
-            %Trasformo la lista di tuple in lista di pid
+% find_value_iterative(NodePID, Key, TriedNodes, NotTriedNodes) ->
+%     RequestId = generate_requestId(),
+%     case catch gen_server:call(NodePID, {find_value, Key, RequestId}, 2000) of
+%         {found_value, Value, RequestId} ->
+%             {ok, Value};
+%         {found_nodes, FoundedNodes, RequestId} ->
+%             %Trasformo la lista di tuple in lista di pid
 
-            FoundedNodesPID = lists:map(
-                fun({PIDNodo, _}) ->
-                    PIDNodo
-                end,
-                FoundedNodes
-            ),
+%             FoundedNodesPID = lists:map(
+%                 fun({PIDNodo, _}) ->
+%                     PIDNodo
+%                 end,
+%                 FoundedNodes
+%             ),
 
-            NewNotTriedNodes = lists:filter(
-                fun(N) ->
-                    not lists:member(N, TriedNodes)
-                end,
-                FoundedNodesPID
-            ),
-            case NewNotTriedNodes of
-                [] ->
-                    {error, not_found};
-                _ ->
-                    %%Interroga il nodo più vicino (il primo nella lista)
-                    NextNodePID = hd(NewNotTriedNodes),
-                    find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], NewNotTriedNodes)
-            end;
-        _ ->
-            case NotTriedNodes of
-                [] ->
-                    %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
-                    {error, not_found};
-                _ ->
-                    % Prova con un altro nodo dai nodi più vicini
-                    case
-                        tl(
-                            lists:filter(
-                                fun(N) -> not lists:member(N, TriedNodes) end, NotTriedNodes
-                            )
-                        )
-                    of
-                        [] ->
-                            {error, not_found};
-                        [NextNode | _] ->
-                            %io:format("Riprova con il nodo ~p\n", [NextNode]),
-                            NextNodePID = NextNode,
-                            find_value_iterative(
-                                NextNodePID, Key, [NodePID | TriedNodes], NotTriedNodes
-                            )
-                    end
-            end
-    end.
+%             NewNotTriedNodes = lists:filter(
+%                 fun(N) ->
+%                     not lists:member(N, TriedNodes)
+%                 end,
+%                 FoundedNodesPID
+%             ),
+%             case NewNotTriedNodes of
+%                 [] ->
+%                     {error, not_found};
+%                 _ ->
+%                     %%Interroga il nodo più vicino (il primo nella lista)
+%                     NextNodePID = hd(NewNotTriedNodes),
+%                     find_value_iterative(NextNodePID, Key, [NodePID | TriedNodes], NewNotTriedNodes)
+%             end;
+%         _ ->
+%             case NotTriedNodes of
+%                 [] ->
+%                     %io:format("Ricerca fallita per la chiave ~p\n", [Key]),
+%                     {error, not_found};
+%                 _ ->
+%                     % Prova con un altro nodo dai nodi più vicini
+%                     case
+%                         tl(
+%                             lists:filter(
+%                                 fun(N) -> not lists:member(N, TriedNodes) end, NotTriedNodes
+%                             )
+%                         )
+%                     of
+%                         [] ->
+%                             {error, not_found};
+%                         [NextNode | _] ->
+%                             %io:format("Riprova con il nodo ~p\n", [NextNode]),
+%                             NextNodePID = NextNode,
+%                             find_value_iterative(
+%                                 NextNodePID, Key, [NodePID | TriedNodes], NotTriedNodes
+%                             )
+%                     end
+%             end
+%     end.
 
-reiterate_find_node(Key, NodePID) ->
-    reiterate_find_node(Key, NodePID, [], 0).
+% find_node_iterative(Key, NodePID) ->
+%     find_node_iterative(Key, NodePID, [], 0).
 
-reiterate_find_node(Key, NodePID, BestNodes, Tries) ->
-    case Tries > 10 of
-        true ->
-            {error, max_retries_reached};
-        _ ->
-            RequestId = generate_requestId(),
-            case gen_server:call(NodePID, {find_node, Key, RequestId}, timer:seconds(2)) of
-                {found_nodes, ClosestNodes, ReceivedRequestId} when is_list(ClosestNodes) ->
-                    case RequestId == ReceivedRequestId of
-                        true ->
-                            case ClosestNodes of
-                                [] ->
-                                    % io:format(
-                                    %     "Nessun nodo vicino trovato, ricerca conclusa.~n", []
-                                    % ),
-                                    {ok, BestNodes};
-                                _ ->
-                                    % Calcola le distanze dai nodi trovati alla chiave
-                                    NodesWithDistance = lists:map(
-                                        fun({Pid, Id}) ->
-                                            Distance = calcola_distanza(Key, Id),
-                                            {Pid, Id, Distance}
-                                        end,
-                                        ClosestNodes
-                                    ),
-                                    % Ordina i nodi per distanza crescente
-                                    NewBestNodes = lists:sort(
-                                        fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end,
-                                        NodesWithDistance
-                                    ),
+% find_node_iterative(Key, NodePID, BestNodes, Tries) ->
+%     case Tries > 10 of
+%         true ->
+%             {error, max_retries_reached};
+%         _ ->
+%             RequestId = generate_requestId(),
+%             case gen_server:call(NodePID, {find_node, Key, RequestId}, timer:seconds(2)) of
+%                 {found_nodes, ClosestNodes, ReceivedRequestId} when is_list(ClosestNodes) ->
+%                     case RequestId == ReceivedRequestId of
+%                         true ->
+%                             case ClosestNodes of
+%                                 [] ->
+%                                     % io:format(
+%                                     %     "Nessun nodo vicino trovato, ricerca conclusa.~n", []
+%                                     % ),
+%                                     {ok, BestNodes};
+%                                 _ ->
+%                                     % Calcola le distanze dai nodi trovati alla chiave
+%                                     NodesWithDistance = lists:map(
+%                                         fun({Pid, Id}) ->
+%                                             Distance = calcola_distanza(Key, Id),
+%                                             {Pid, Id, Distance}
+%                                         end,
+%                                         ClosestNodes
+%                                     ),
+%                                     % Ordina i nodi per distanza crescente
+%                                     NewBestNodes = lists:sort(
+%                                         fun({_, _, D1}, {_, _, D2}) -> D1 < D2 end,
+%                                         NodesWithDistance
+%                                     ),
 
-                                    case BestNodes == [] of
-                                        %Caso base
-                                        true ->
-                                            [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
-                                            case FirstNewBestNodesDistance == 0 of
-                                                true ->
-                                                    % Ferma l'iterazione
-                                                    % io:format(
-                                                    %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
-                                                    % ),
-                                                    NewBestNodesNoDistance = lists:map(
-                                                        fun({PIDNodo, IdNodo, _}) ->
-                                                            {PIDNodo, IdNodo}
-                                                        end,
-                                                        NewBestNodes
-                                                    ),
-                                                    {ok, NewBestNodesNoDistance};
-                                                _ ->
-                                                    % Se ci sono nodi migliori, continua l'iterazione
-                                                    % io:format(
-                                                    %     "Trovati nodi più vicini, si continua l'iterazione.~n"
-                                                    % ),
-                                                    [{NewNodePID, _, _} | _] = NewBestNodes,
-                                                    %timer:sleep(1000),
-                                                    reiterate_find_node(
-                                                        Key, NewNodePID, NewBestNodes, Tries + 1
-                                                    )
-                                            end;
-                                        _ ->
-                                            [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
-                                            [{_, _, FirstBestNodesDistance} | _] = BestNodes,
-                                            % Confronta i nuovi nodi con i migliori precedenti
-                                            case
-                                                FirstNewBestNodesDistance < FirstBestNodesDistance
-                                            of
-                                                true ->
-                                                    case FirstNewBestNodesDistance == 0 of
-                                                        true ->
-                                                            % Altrimenti, ferma l'iterazione
-                                                            % io:format(
-                                                            %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
-                                                            % ),
-                                                            NewBestNodesNoDistance = lists:map(
-                                                                fun({PIDNodo, IdNodo, _}) ->
-                                                                    {PIDNodo, IdNodo}
-                                                                end,
-                                                                NewBestNodes
-                                                            ),
-                                                            {ok, NewBestNodesNoDistance};
-                                                        _ ->
-                                                            % Se ci sono nodi migliori, continua l'iterazione
-                                                            % io:format(
-                                                            %     "Trovati nodi più vicini, si continua l'iterazione.~n"
-                                                            % ),
-                                                            [{NewNodePID, _, _} | _] = NewBestNodes,
-                                                            %timer:sleep(1000),
-                                                            reiterate_find_node(
-                                                                Key,
-                                                                NewNodePID,
-                                                                NewBestNodes,
-                                                                Tries + 1
-                                                            )
-                                                    end;
-                                                _ ->
-                                                    % Altrimenti, ferma l'iterazione
-                                                    % io:format(
-                                                    %     "Nessun nodo più vicino trovato, ricerca conclusa.~n"
-                                                    % ),
-                                                    %Elimino la distanza
-                                                    BestNodesNoDistance = lists:map(
-                                                        fun({PIDNodo, IdNodo, _}) ->
-                                                            {PIDNodo, IdNodo}
-                                                        end,
-                                                        BestNodes
-                                                    ),
-                                                    {ok, BestNodesNoDistance}
-                                            end
-                                    end
-                            end;
-                        _ ->
-                            %io:format("RequestId ricevuto non corretto~n"),
-                            {ok, BestNodes}
-                    end;
-                {error, Reason} ->
-                    %io:format("Errore durante find_node: ~p~n", [Reason]),
-                    timer:sleep(1000),
-                    reiterate_find_node(Key, NodePID, BestNodes, Tries + 1);
-                Other ->
-                    %io:format("Risposta non gestita da find_node: ~p~n", [Other]),
-                    timer:sleep(1000),
-                    reiterate_find_node(Key, NodePID, BestNodes, Tries + 1)
-            end
-    end.
+%                                     case BestNodes == [] of
+%                                         %Caso base
+%                                         true ->
+%                                             [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
+%                                             case FirstNewBestNodesDistance == 0 of
+%                                                 true ->
+%                                                     % Ferma l'iterazione
+%                                                     % io:format(
+%                                                     %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+%                                                     % ),
+%                                                     NewBestNodesNoDistance = lists:map(
+%                                                         fun({PIDNodo, IdNodo, _}) ->
+%                                                             {PIDNodo, IdNodo}
+%                                                         end,
+%                                                         NewBestNodes
+%                                                     ),
+%                                                     {ok, NewBestNodesNoDistance};
+%                                                 _ ->
+%                                                     % Se ci sono nodi migliori, continua l'iterazione
+%                                                     % io:format(
+%                                                     %     "Trovati nodi più vicini, si continua l'iterazione.~n"
+%                                                     % ),
+%                                                     [{NewNodePID, _, _} | _] = NewBestNodes,
+%                                                     %timer:sleep(1000),
+%                                                     find_node_iterative(
+%                                                         Key, NewNodePID, NewBestNodes, Tries + 1
+%                                                     )
+%                                             end;
+%                                         _ ->
+%                                             [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodes,
+%                                             [{_, _, FirstBestNodesDistance} | _] = BestNodes,
+%                                             % Confronta i nuovi nodi con i migliori precedenti
+%                                             case
+%                                                 FirstNewBestNodesDistance < FirstBestNodesDistance
+%                                             of
+%                                                 true ->
+%                                                     case FirstNewBestNodesDistance == 0 of
+%                                                         true ->
+%                                                             % Altrimenti, ferma l'iterazione
+%                                                             % io:format(
+%                                                             %     "Nodo con distanza 0 trovato, ricerca conclusa.~n"
+%                                                             % ),
+%                                                             NewBestNodesNoDistance = lists:map(
+%                                                                 fun({PIDNodo, IdNodo, _}) ->
+%                                                                     {PIDNodo, IdNodo}
+%                                                                 end,
+%                                                                 NewBestNodes
+%                                                             ),
+%                                                             {ok, NewBestNodesNoDistance};
+%                                                         _ ->
+%                                                             % Se ci sono nodi migliori, continua l'iterazione
+%                                                             % io:format(
+%                                                             %     "Trovati nodi più vicini, si continua l'iterazione.~n"
+%                                                             % ),
+%                                                             [{NewNodePID, _, _} | _] = NewBestNodes,
+%                                                             %timer:sleep(1000),
+%                                                             find_node_iterative(
+%                                                                 Key,
+%                                                                 NewNodePID,
+%                                                                 NewBestNodes,
+%                                                                 Tries + 1
+%                                                             )
+%                                                     end;
+%                                                 _ ->
+%                                                     % Altrimenti, ferma l'iterazione
+%                                                     % io:format(
+%                                                     %     "Nessun nodo più vicino trovato, ricerca conclusa.~n"
+%                                                     % ),
+%                                                     %Elimino la distanza
+%                                                     BestNodesNoDistance = lists:map(
+%                                                         fun({PIDNodo, IdNodo, _}) ->
+%                                                             {PIDNodo, IdNodo}
+%                                                         end,
+%                                                         BestNodes
+%                                                     ),
+%                                                     {ok, BestNodesNoDistance}
+%                                             end
+%                                     end
+%                             end;
+%                         _ ->
+%                             %io:format("RequestId ricevuto non corretto~n"),
+%                             {ok, BestNodes}
+%                     end;
+%                 {error, Reason} ->
+%                     %io:format("Errore durante find_node: ~p~n", [Reason]),
+%                     timer:sleep(1000),
+%                     find_node_iterative(Key, NodePID, BestNodes, Tries + 1);
+%                 Other ->
+%                     %io:format("Risposta non gestita da find_node: ~p~n", [Other]),
+%                     timer:sleep(1000),
+%                     find_node_iterative(Key, NodePID, BestNodes, Tries + 1)
+%             end
+%     end.
 
 %Funzione da testare per avere meno righe di codice
 % reiterate_find_node2(Key, NodePID, BestNodes, Tries) ->
@@ -769,7 +785,6 @@ start_nodes(NumNodes, BootstrapNode) ->
         % Primo nodo, diventa bootstrap
         {} ->
             start_link(Name, undefined),
-
             start_nodes(NumNodes - 1, {Name, whereis(Name)});
         % Nodi successivi, si connettono al bootstrap
         {NameBootstrap, BootstrapNodePID} ->
@@ -777,200 +792,383 @@ start_nodes(NumNodes, BootstrapNode) ->
             start_nodes(NumNodes - 1, {NameBootstrap, BootstrapNodePID})
     end.
 
-calcola_tempo_totale(Key) ->
-    NumNodes = 100,
-    ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
-    NodiETempi = [
-        {Node, Tempo}
-     || Node <- ListaNodi,
-        {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
-    ],
-    Tempi = [Tempo || {_, Tempo} <- NodiETempi],
-    Media = lists:sum(Tempi) / length(Tempi),
-    Percentuale = (length(Tempi) / NumNodes) * 100,
-    io:format("Media dei tempi: ~p~n", [Media]),
-    io:format("Percentuale nodi che hanno trovato il valore: ~p~n", [Percentuale]),
-    lists:foreach(
-        fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
-    ).
+% calcola_tempo_totale(Key) ->
+%     NumNodes = 100,
+%     ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
+%     NodiETempi = [
+%         {Node, Tempo}
+%      || Node <- ListaNodi,
+%         {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
+%     ],
+%     Tempi = [Tempo || {_, Tempo} <- NodiETempi],
+%     Media = lists:sum(Tempi) / length(Tempi),
+%     Percentuale = (length(Tempi) / NumNodes) * 100,
+%     io:format("Media dei tempi: ~p~n", [Media]),
+%     io:format("Percentuale nodi che hanno trovato il valore: ~p~n", [Percentuale]),
+%     lists:foreach(
+%         fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
+%     ).
 
-calcola_tempo(Node, Key) ->
-    Inizio = erlang:monotonic_time(microsecond),
-    Risultato = find_value_iterative(Node, Key),
-    Fine = erlang:monotonic_time(microsecond),
-    Tempo = Fine - Inizio,
-    case Risultato of
-        {ok, Value} -> {ok, Value, Tempo};
-        _ -> false
-    end.
+% calcola_tempo(Node, Key) ->
+%     Inizio = erlang:monotonic_time(microsecond),
+%     Risultato = find_value_iterative(Node, Key),
+%     Fine = erlang:monotonic_time(microsecond),
+%     Tempo = Fine - Inizio,
+%     case Risultato of
+%         {ok, Value} -> {ok, Value, Tempo};
+%         _ -> false
+%     end.
 
-% find_value_parallel(Key) ->
-%     Coordinator = spawn(fun() -> coordinator_loop(Key, self(), []) end),
-%     Coordinator.
+%Funzione per avviare la funzione find_value_iterative in parallelo ad ogni nodo presente
+%nella lista di alpha nodi più vicini al valore restituiti dal nodo target
+% find_value_parallel(NodePID, Key) ->
+%     RequestId = generate_requestId(),
+%     case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
+%         {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
+%             case RequestId == ReceivedRequestId of
+%                 true ->
+%                     %Trasformo i nodi ricevuti in una lista di soli PID
+%                     AlphaClosestNodesPID = lists:map(
+%                         fun({PIDNodo, _}) ->
+%                             PIDNodo
+%                         end,
+%                         AlphaClosestNodes
+%                     ),
+%                     Self = self(),
 
-% coordinator_loop(Key, NodesToQuery, Caller, Results) ->
-%     Pids = [spawn(fun() -> worker_loop(Node, Key, Coordinator) end) || Node <- NodesToQuery],
-%     collect_responses(Pids, Caller, Results).
+%                     %Faccio la spawn di un processo per ogni alpha nodo che è stato restituito
+%                     Actors = [
+%                         spawn(fun() -> find_value_search_actor(Self, Node, Key) end)
+%                      || Node <- AlphaClosestNodesPID
+%                     ],
 
-% worker_loop(Node, Key, Coordinator) ->
+%                     % Funzione per inviare il messaggio di stop a tutti gli attori
+%                     StopFun = fun(Actor) -> Actor ! stop end,
+
+%                     receive
+%                         {found, Key, Value, FromNode} ->
+%                             io:format("Sono il parent, valore trovato~n"),
+%                             % Trovato il valore: invia stop a tutti gli altri attori
+%                             lists:foreach(StopFun, Actors),
+%                             {ok, Value, FromNode}
+%                         % Timeout di 5 secondi
+%                     after 5000 ->
+%                         % Nessun valore trovato entro il timeout: invia stop e restituisci errore
+%                         lists:foreach(StopFun, Actors),
+%                         {error, not_found}
+%                     end;
+%                 _ ->
+%                     {error, invalid_requestid}
+%             end;
+%         _ ->
+%             {error, not_found}
+%     end.
+
+% find_value_search_actor(Parent, Node, Key) ->
+%     io:format("Chiedo al nodo ~p, il mi parent è: ~p, la key è:~p~n", [Node, Parent, Key]),
+%     % MilliSecondiRandom = rand:uniform(1000),
+%     % timer:sleep(MilliSecondiRandom),
+%     % io:format("Sono il pid che cerca il nodo: ~p, ho atteso la sleep di ~p secondi~n", [
+%     %     Node, MilliSecondiRandom
+%     % ]),
 %     case knode:find_value_iterative(Node, Key) of
 %         {ok, Value} ->
-%             Coordinator ! {found, self(), {ok, Value}};
-%         {error, Reason} ->
-%             Coordinator ! {error, self(), Reason}
+%             % Valore trovato: invia il messaggio al processo principale
+%             io:format("Valore trovato, invio messaggio al parent...~n"),
+%             Parent ! {found, Key, Value, Node};
+%         {error, _} ->
+%             % Valore non trovato: termina
+%             ok
 %     end.
 
-% collect_responses(Pids, Caller, Results) ->
-%     receive
-%         {found, Pid, {ok, Value}} ->
-%             terminate_workers(lists:delete(Pid, Pids)),
-%             Caller ! {ok, Value},
-%             % Termina la ricerca non appena si trova il valore
-%             ok;
-%         {error, Pid, Reason} ->
-%             NewResults = [{error, Reason} | Results],
-%             case length(NewResults) >= ?A of
+% %Funzione per avviare la funzione reiterate_find_node in parallelo ad ogni nodo presente
+% %nella lista di alpha nodi più vicini al valore restituiti dal nodo target
+% find_node_parallel(NodePID, Key) ->
+%     RequestId = generate_requestId(),
+%     case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
+%         {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
+%             case RequestId == ReceivedRequestId of
 %                 true ->
-%                     Caller ! {error, not_found},
-%                     % Termina se tutti i worker hanno dato errore
-%                     ok;
-%                 false ->
-%                     collect_responses(lists:delete(Pid, Pids), Caller, NewResults)
-%             end
-%     after 5000 ->
-%         Caller ! {error, timeout},
-%         % Termina la ricerca per timeout
-%         ok
+%                     %Trasformo i nodi ricevuti in una lista di soli PID
+%                     AlphaClosestNodesPID = lists:map(
+%                         fun({PIDNodo, _}) ->
+%                             PIDNodo
+%                         end,
+%                         AlphaClosestNodes
+%                     ),
+%                     Self = self(),
+
+%                     %Faccio la spawn di un processo per ogni alpha nodo che è stato restituito
+%                     Actors = [
+%                         spawn(fun() -> find_node_search_actor(Self, Node, Key) end)
+%                      || Node <- AlphaClosestNodesPID
+%                     ],
+
+%                     % Funzione per inviare il messaggio di stop a tutti gli attori
+%                     StopFun = fun(Actor) -> Actor ! stop end,
+
+%                     receive
+%                         {found, Key, Value, FromNode} ->
+%                             io:format("Sono il parent, valore trovato~n"),
+%                             % Trovato il valore: invia stop a tutti gli altri attori
+%                             lists:foreach(StopFun, Actors),
+%                             {ok, Value, FromNode}
+%                         % Timeout di 5 secondi
+%                     after 5000 ->
+%                         % Nessun valore trovato entro il timeout: invia stop e restituisci errore
+%                         lists:foreach(StopFun, Actors),
+%                         {error, not_found}
+%                     end;
+%                 _ ->
+%                     {error, invalid_requestid}
+%             end;
+%         _ ->
+%             {error, not_found}
 %     end.
 
-% terminate_workers(Pids) ->
-%     [exit(Pid, kill) || Pid <- Pids].
+% find_node_search_actor(Parent, Node, Key) ->
+%     io:format("Chiedo al nodo ~p, il mi parent è: ~p, la key è:~p~n", [Node, Parent, Key]),
+%     % MilliSecondiRandom = rand:uniform(1000),
+%     % timer:sleep(MilliSecondiRandom),
+%     % io:format("Sono il pid che cerca il nodo: ~p, ho atteso la sleep di ~p secondi~n", [
+%     %     Node, MilliSecondiRandom
+%     % ]),
+%     case knode:find_node_iterative(Node, Key) of
+%         {ok, BestNodes} ->
+%             % Nodi
+%             io:format("Valore trovato, invio messaggio al parent...~n"),
+%             Parent ! {found, Key, BestNodes, Node};
+%         {error, max_retries_reached} ->
+%             ok;
+%         {error, _} ->
+%             % Valore non trovato: termina
+%             ok
+%     end.
 
-%voglio mandare una richiesta al pid in modo
-%che prendo i suoi kbuckets per fare le richieste
-%in parallelo a loro
-find_value_parallel(NodePID, Key) ->
-    RequestId = generate_requestId(),
-    case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
-        {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
-            %Qui farò partire i miei threads
+find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
+    case BestNodes == [] of
+        %caso base
+        true ->
+            io:format("La lista:~p~n", [AlphaClosestNodes]),
+            %Creo la lista di soli pid dalla lista di tuple
+            ParentPID = self(),
             AlphaClosestNodesPID = lists:map(
                 fun({PIDNodo, _}) ->
                     PIDNodo
                 end,
                 AlphaClosestNodes
             ),
-            Self = self(),
+            %α
+            % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
+            lists:foreach(
+                fun(PIDNodo) ->
+                    % Utilizzo di erlang:spawn/3 per eseguire la richiesta in un nuovo processo
+                    spawn(fun() ->
+                        % Eseguo la richiesta al nodo
+                        RequestId = generate_requestId(),
+                        Response = gen_server:call(PIDNodo, {find_node, Key, RequestId}),
+                        %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
+                        %allora manda invalid_request id, negli altri casi manda una response
+                        case Response of
+                            {found_nodes, _, ReceivedRequestId} ->
+                                case RequestId == ReceivedRequestId of
+                                    true ->
+                                        ParentPID ! {ok, Response};
+                                    _ ->
+                                        ParentPID ! {invalid_requestid, Response}
+                                end;
+                            _ ->
+                                ParentPID ! {ok, Response}
+                        end
+                    % Invio la risposta al processo principale
+                    end)
+                end,
+                AlphaClosestNodesPID
+            ),
 
-            Actors = [
-                spawn(fun() -> search_actor(Self, Node, Key) end)
-             || Node <- AlphaClosestNodesPID
-            ],
+            % Gestisco le risposte, ricevo una lista di liste di nodi ricevuti
+            Responses = receive_responses(length(AlphaClosestNodesPID), []),
+            FlatResponse = lists:flatten(Responses),
 
-            % Funzione per inviare il messaggio di stop a tutti gli attori
-            StopFun = fun(Actor) -> Actor ! stop end,
+            %Qui aggiungo anche i nodi che ho interrogato
+            ReceivedNodesAndTriedNodes = FlatResponse ++ AlphaClosestNodes,
 
-            receive
-                {found, Key, Value, FromNode} ->
-                    io:format("Sono il parent, valore trovato"),
-                    % Trovato il valore: invia stop a tutti gli altri attori
-                    lists:foreach(StopFun, Actors),
-                    {ok, Value, FromNode}
-                % Timeout di 5 secondi
-            after 5000 ->
-                % Nessun valore trovato entro il timeout: invia stop e restituisci errore
-                lists:foreach(StopFun, Actors),
-                {error, not_found}
+            NoDuplicatedList = ordsets:to_list(ordsets:from_list(ReceivedNodesAndTriedNodes)),
+
+            NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
+            %Ordina i nodi per distanza crescente.
+            NodiOrdinati = lists:sort(
+                fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
+            ),
+
+            % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+            NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
+            NewBestNodes = lists:map(
+                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
+            ),
+
+            NewBestNodesNoSelf = lists:filter(
+                fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes
+            ),
+
+            %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
+            find_node_iterative(
+                lists:sublist(NewBestNodesNoSelf, ?A), Key, NewBestNodesWithDistance
+            );
+        %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
+        %i processi alla prossima iterazione
+        _ ->
+            %Creo la lista di soli pid dalla lista di tuple
+            ParentPID = self(),
+            AlphaClosestNodesPID = lists:map(
+                fun({PIDNodo, _}) ->
+                    PIDNodo
+                end,
+                AlphaClosestNodes
+            ),
+            %α
+            % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
+            lists:foreach(
+                fun(PIDNodo) ->
+                    % Utilizzo di erlang:spawn/3 per eseguire la richiesta in un nuovo processo
+                    spawn(fun() ->
+                        % Eseguo la richiesta al nodo
+                        RequestId = generate_requestId(),
+                        Response = gen_server:call(PIDNodo, {find_node, Key, RequestId}),
+                        %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
+                        %allora manda invalid_request id, negli altri casi manda una response
+                        case Response of
+                            {found_nodes, _, ReceivedRequestId} ->
+                                case RequestId == ReceivedRequestId of
+                                    true ->
+                                        ParentPID ! {ok, Response};
+                                    _ ->
+                                        ParentPID ! {invalid_requestid, Response}
+                                end;
+                            _ ->
+                                ParentPID ! {ok, Response}
+                        end
+                    % Invio la risposta al processo principale
+                    end)
+                end,
+                AlphaClosestNodesPID
+            ),
+
+            % Gestisco le risposte, ricevo una lista di liste di nodi ricevuti
+            Responses = receive_responses(length(AlphaClosestNodesPID), []),
+
+            FlatResponse = lists:flatten(Responses),
+
+            %Qui aggiungo anche i nodi che ho interrogato
+            ReceivedNodesAndTriedNodes = FlatResponse ++ AlphaClosestNodes,
+
+            NoDuplicatedList = ordsets:to_list(ordsets:from_list(ReceivedNodesAndTriedNodes)),
+
+            NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
+            %Ordina i nodi per distanza crescente.
+            NodiOrdinati = lists:sort(
+                fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
+            ),
+
+            % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+            NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
+            NewBestNodes = lists:map(
+                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
+            ),
+            io:format(
+                "La lista dei kclosest appena trovata da~p è:~p, mentre quella dei bestnodes è: ~p~n ",
+                [ParentPID, NewBestNodesWithDistance, BestNodes]
+            ),
+
+            % [{_, _, FirstNewBestNodesDistance} | _] = NewBestNodesWithDistance,
+            % [{_, _, FirstBestNodesDistance} | _] = BestNodes,
+
+            % case FirstNewBestNodesDistance < FirstBestNodesDistance of
+            %     true ->
+            %         %ho trovato i nodi più vicini
+            %         find_node_iterative(
+            %             lists:sublist(NewBestNodes, ?A), Key, NewBestNodesWithDistance
+            %         );
+            %     _ ->
+            %         io:format("ho trovato nodi più vicini"),
+            %         NewBestNodes
+            % end
+
+            % case NewBestNodesWithDistance == BestNodes of
+            %     true ->
+            %         %ho trovato i nodi più vicini
+            %         io:format("ho trovato nodi più vicini"),
+            %         NewBestNodes;
+            %     _ ->
+            %         find_node_iterative(
+            %             lists:sublist(NewBestNodes, ?A), Key, NewBestNodesWithDistance
+            %         )
+            % end
+
+            %forse per far convergere devo mettere come argomento tutti i nodi che sono stati trovati
+            %e se i nuovi nodi trovati sono un sottoinsieme di tutti i nodi trovati allora converge
+
+            case lists:all(fun(X) -> lists:member(X, BestNodes) end, NewBestNodesWithDistance) of
+                true ->
+                    %ho trovato i nodi più vicini
+                    io:format("non ho trovato nodi più vicini"),
+                    lists:sublist(BestNodes, ?K);
+                %NewBestNodes;
+                _ ->
+                    AllReceivedNodesWithDuplicates = NewBestNodesWithDistance ++ BestNodes,
+                    AllReceivedNodesNosort = ordsets:to_list(
+                        ordsets:from_list(AllReceivedNodesWithDuplicates)
+                    ),
+                    AllReceivedNodes = lists:sort(
+                        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end,
+                        AllReceivedNodesNosort
+                    ),
+
+                    NewBestNodesNoSelf = lists:filter(
+                        fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes
+                    ),
+
+                    find_node_iterative(
+                        lists:sublist(NewBestNodesNoSelf, ?A), Key, AllReceivedNodes
+                    )
+            end
+    end.
+
+receive_responses(0, Responses) ->
+    % Ho ricevuto tutte le risposte, posso elaborarle
+    %elaborate_responses(Responses);
+    Responses;
+receive_responses(N, Responses) ->
+    receive
+        {ok, Response} ->
+            case Response of
+                {found_nodes, NodeList, _} ->
+                    receive_responses(N - 1, [NodeList | Responses]);
+                _ ->
+                    receive_responses(N - 1, [Responses])
+            end;
+        {invalid_requestid, _} ->
+            receive_responses(N - 1, [Responses])
+        % Ricevo una risposta e la aggiungo alla lista
+    end.
+
+% elaborate_responses(Responses) ->
+%     % Elaboro le risposte ricevute
+%     io:format("La lista:~p~n ", [Responses]),
+
+%     {nodes,ListNodes}.
+
+%mando un messaggio al nodo che deve coordinare la routine iterativa della ricerca
+start_find_node_iterative(NodePID, Key) ->
+    RequestId = generate_requestId(),
+    case gen_server:call(NodePID, {start_find_node_iterative, Key, RequestId}, timer:seconds(2)) of
+        {founded_nodes_from_iteration, FoundedNodes, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    {ok, FoundedNodes, NodePID};
+                _ ->
+                    {error, invalid_requestid, NodePID}
             end;
         _ ->
-            {error, not_found}
+            {error, not_found, NodePID}
     end.
-
-search_actor(Parent, Node, Key) ->
-    io:format("Chiedo al nodo ~p, il mi parent è: ~p, la key è:~p~n", [Node, Parent, Key]),
-    case knode:find_value_iterative(Node, Key) of
-        {ok, Value} ->
-            % Valore trovato: invia il messaggio al processo principale
-            io:format("Valore trovato, invio messaggio al parent..."),
-            Parent ! {found, Key, Value, Node};
-        {error, _} ->
-            % Valore non trovato: termina
-            ok
-    end.
-
-% find_value_parallel(NodePID, Key) ->
-%     RequestId = generate_requestId(),
-%     case gen_server:call(NodePID, {get_alpha_nodes, Key, RequestId}, timer:seconds(2)) of
-%         {alpha_nodes, AlphaClosestNodes, ReceivedRequestId} ->
-%             % Creazione di un processo "gestore"
-%             GestorePid = spawn(fun() -> gestore_risultati(length(AlphaClosestNodes), self(), []) end),
-
-%             % Avvio dei processi find_value_iterative (con monitoraggio)
-%             PidsRefs = avvia_ricerche(AlphaClosestNodes, Key, GestorePid),
-%             Pids = lists:map(fun({Pid, _Ref}) -> Pid end, PidsRefs),
-
-%             % Attesa del risultato o timeout
-%             receive
-%                 {valore_trovato, Valore} ->
-%                     % Funzione per terminare gli altri processi
-%                     kill_processi(Pids),
-%                     {ok, Valore};
-%                 timeout ->
-%                     kill_processi(Pids),
-%                     {error, timeout};
-%                 {'DOWN', _Ref, process, Pid, Reason} ->
-%                     io:format("Processo ~p terminato con motivo ~p~n", [Pid, Reason]),
-%                     kill_processi(Pids),
-%                     {error, not_found}
-%             after 5000 ->
-%                 kill_processi(Pids),
-%                 {error, timeout}
-%             end;
-%         _ ->
-%             {error, not_found}
-%     end.
-
-% avvia_ricerche(AlphaClosestNodes, Key, GestorePid) ->
-%     lists:map(
-%         fun({PIDNodo, _}) ->
-%             spawn_monitor(fun() ->
-%                 case knode:find_value_iterative(PIDNodo, Key) of
-%                     {ok, Valore} ->
-%                         io:format("Pippo~n"),
-
-%                         GestorePid ! {valore_trovato, Valore};
-%                     {error, not_found} ->
-%                         io:format("Pippo2~n"),
-
-%                         GestorePid ! not_found
-%                 end
-%             end)
-%         end,
-%         AlphaClosestNodes
-%     ).
-
-% gestore_risultati(0, Pid, _Acc) ->
-%     Pid ! timeout;
-% gestore_risultati(N, Pid, Acc) ->
-%     receive
-%         {valore_trovato, Valore} ->
-%             Pid ! {valore_trovato, Valore};
-%         not_found ->
-%             gestore_risultati(N - 1, Pid, Acc);
-%         _ ->
-%             %Ignora altri messaggi
-%             gestore_risultati(N - 1, Pid, Acc)
-%     end.
-
-% kill_processi(Pids) ->
-%     lists:foreach(
-%         fun(Pid) ->
-%             try
-%                 exit(Pid, kill)
-%             catch
-%                 %ignora se il processo è già terminato
-%                 error:noproc -> ok
-%             end
-%         end,
-%         Pids
-%     ).
