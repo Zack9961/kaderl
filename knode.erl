@@ -2,7 +2,7 @@
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
 -define(K, 20).
--define(T, 15).
+-define(T, 3600).
 -define(A, 3).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
@@ -10,10 +10,10 @@
     get_id/1,
     read_store/0,
     find_node/3,
-    find_value/3,
+    %find_value/3,
     ping/1,
-    find_value_iterative/2,
-    find_node_iterative/2,
+    find_value_iterative/4,
+    find_node_iterative/3,
     start_nodes/1,
     calcola_tempo_totale_find_value/1,
     start_find_node_iterative/2,
@@ -33,7 +33,7 @@ init(State) ->
     %recupero il nodo bootstrap
     BootstrapNodePID = maps:get(bootstrap, State, undefined),
     start_periodic_republish(self()),
-    NewState = {Id, 0, State, StoreTable, KBuckets},
+    NewState = {Id, State, StoreTable, KBuckets},
     case BootstrapNodePID of
         % Sono il primo nodo
         undefined ->
@@ -55,7 +55,7 @@ init(State) ->
                     %     BootstrapNodePID, Reason
                     % ]),
                     {ok, NewState};
-                {k_buckets, BucketsReceived, BootstrapID, RequestIdReceived} ->
+                {k_buckets, ClosestNodesReceived, BootstrapID, RequestIdReceived} ->
                     % Nodo bootstrap raggiungibile, procedo normalmente
                     % io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
                     %     BootstrapNodePID, BootstrapID
@@ -68,7 +68,11 @@ init(State) ->
                             add_bootstrap_node_in_kbuckets(
                                 BootstrapNodePID, KBuckets, Id, BootstrapID
                             ),
-                            add_nodes_to_kbuckets(Id, BucketsReceived, KBuckets),
+                            %KBucketsList = ets:tab2list(BucketsReceived),
+                            %NodesList = get_all_nodes_from_kbuckets_list(KBucketsList),
+                            %Potrei mettere la find_closest_nodes, così non metto
+                            %tutti i nodi ma solo quelli più vicini
+                            add_nodes_to_kbuckets(Id, ClosestNodesReceived, KBuckets),
                             {ok, NewState};
                         _ ->
                             % io:format("Sono il nodo con pid: ~p Request Id non corretto~n", [
@@ -78,60 +82,71 @@ init(State) ->
                     end
             end
     end.
-handle_call({ping, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    {PID, _} = _From,
+handle_call({ping, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
+    %{PID, _} = _From,
     %io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
-    {reply, {pong, self(), RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
-handle_call(get_id, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    {reply, Id, {Id, Counter, State, StoreTable, KBuckets}};
-handle_call({get_alpha_nodes, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+    {reply, {pong, self(), RequestId}, {Id, State, StoreTable, KBuckets}};
+handle_call(get_id, _From, {Id, State, StoreTable, KBuckets}) ->
+    {reply, Id, {Id, State, StoreTable, KBuckets}};
+handle_call({get_alpha_nodes, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
     KBucketsList = ets:tab2list(KBuckets),
     KClosestNodes = find_closest_nodes(Key, KBucketsList),
     AlphaClosestNodes = lists:sublist(KClosestNodes, ?A),
-    {reply, {alpha_nodes, AlphaClosestNodes, RequestId},
-        {Id, Counter, State, StoreTable, KBuckets}};
+    {reply, {alpha_nodes, AlphaClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}};
 %Funzione cancellabile?
-handle_call({read_store, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
+handle_call({read_store, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
     %io:format("Received read_store request from ~p,~p~n", [_From, Id]),
     % Leggi la tabella ETS
     Tuples = ets:tab2list(StoreTable),
     %io:format("Table content: ~p~n", [Tuples]),
-    {reply, {Tuples, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+    {reply, {Tuples, RequestId}, {Id, State, StoreTable, KBuckets}};
 handle_call(
-    {find_node, ToFindNodeId, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
+    {find_node, ToFindNodeId, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
-    {PID, _} = _From,
+    %{PID, _} = _From,
     %io:format("Node ~p (~p) received FIND_NODE request for ID ~p from ~p~n", [
     %    self(), Id, ToFindNodeId, PID
     %]),
-    % 1. Recupera i k-bucket dalla tabella ETS
+
+    %ParentNode perché se prendessi le informazioni da _From sarebbero
+    %le informazioni del processo generato da spawn e non del nodo
+    %che invia la richiesta direttamente
+
+    %provo ad aggiungere il nodo che mi ha inviato la richiesta ai miei kbuckets
+    add_node_to_kbuckets(Id, ParentNode, KBuckets),
+
+    % Recupera i k-bucket dalla tabella ETS
     KBucketsList = ets:tab2list(KBuckets),
-    % 2. Implementa la logica per trovare i nodi più vicini
+    % Cerco i nodi più vicini nei miei kbucketss
     ClosestNodes = find_closest_nodes(ToFindNodeId, KBucketsList),
-    % 3. Rispondi al nodo richiedente con la lista dei nodi più vicini
-    {reply, {found_nodes, ClosestNodes, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
-handle_call({find_value, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}) ->
-    {PID, _} = _From,
-    %io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
-    %    self(), Id, Key, PID
-    %]),
-    %[{Key, Value}] = ets:lookup(StoreTable, Key),
+    % Rispondi al nodo richiedente con la lista dei nodi più vicini
+    {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}};
+handle_call(
+    {find_value, Key, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+) ->
+    %{PID, _} = _From,
+    % io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
+    %     self(), Id, Key, ParentPID
+    % ]),
+
+    %Aggiungo il ParentNode, nei miei kbuckets
+    add_node_to_kbuckets(Id, ParentNode, KBuckets),
+
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
             %io:format("Nodo ~p trova il valore ~p", [self(), Key]),
-            {reply, {found_value, Value, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+            {reply, {found_value, Value, RequestId}, {Id, State, StoreTable, KBuckets}};
         %PID ! {found_value, Value};
         [] ->
             % Il nodo non ha il valore, restituisce i nodi più vicini
             KBucketsList = ets:tab2list(KBuckets),
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
-            {reply, {found_nodes, ClosestNodes, RequestId},
-                {Id, Counter, State, StoreTable, KBuckets}}
+            {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}}
         %PID ! {found_nodes, ClosestNodes}
     end;
 handle_call(
-    {join_request, IdNewNode, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
+    {join_request, IdNewNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
     {PID, _} = _From,
     %io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PID]),
@@ -184,10 +199,12 @@ handle_call(
     %Reinserisco la tupla aggiornata nel k-bucket
     ets:insert(KBuckets, {Key, NewNodes}),
 
-    % invia i miei k-buckets
-    {reply, {k_buckets, KBuckets, Id, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+    % invia la lista di nodi più vicini a lui
+    KBucketsList = ets:tab2list(KBuckets),
+    ClosestNodes = find_closest_nodes(IdNewNode, KBucketsList),
+    {reply, {k_buckets, ClosestNodes, Id, RequestId}, {Id, State, StoreTable, KBuckets}};
 handle_call(
-    {start_find_node_iterative, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
+    {start_find_node_iterative, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
@@ -196,13 +213,17 @@ handle_call(
     %Scelgo alpha nodi da interrogare in parallelo
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
 
+    %ParentNode utile per dare l'informazione del nodo padre ai nodi riceventi
+    %in modo che possono aggiungere questo nodo ai propri kbuckets
+    ParentNode = {self(), Id},
+
     %Quindi faccio partire la funzione find_node_iterative
-    IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key),
+    IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key, ParentNode),
 
     {reply, {founded_nodes_from_iteration, IterativeNodesFound, RequestId},
-        {Id, Counter, State, StoreTable, KBuckets}};
+        {Id, State, StoreTable, KBuckets}};
 handle_call(
-    {start_find_value_iterative, Key, RequestId}, _From, {Id, Counter, State, StoreTable, KBuckets}
+    {start_find_value_iterative, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
@@ -212,25 +233,23 @@ handle_call(
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
 
     %Quindi faccio partire la funzione find_value_iterative
-    IterativeFound = find_value_iterative(AlphaClosestNodes, Key),
+    ParentNode = {self(), Id},
+    IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode, KBuckets),
 
     %io:format("IterativeFound è :~p~n", [IterativeFound]),
 
     case IterativeFound of
         {found_value, Value} ->
-            {reply, {found_value, Value, RequestId}, {Id, Counter, State, StoreTable, KBuckets}};
+            {reply, {found_value, Value, RequestId}, {Id, State, StoreTable, KBuckets}};
         _ ->
-            {reply, {value_not_found, IterativeFound, RequestId},
-                {Id, Counter, State, StoreTable, KBuckets}}
+            {reply, {value_not_found, IterativeFound, RequestId}, {Id, State, StoreTable, KBuckets}}
     end;
 handle_call(_Request, _From, State) ->
     %io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
 
-handle_cast({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+handle_cast({store, Value}, {Id, State, StoreTable, KBuckets}) ->
     %io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
-    % Incrementa il contatore
-    NewCounter = Counter + 1,
     %Calcola la key
     HashValue = crypto:hash(sha, integer_to_binary(Value)),
     Key = binary_to_integer_representation(HashValue),
@@ -238,23 +257,22 @@ handle_cast({store, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
     ets:insert(StoreTable, {Key, Value}),
     %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
     % Rispondi al client
-    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
-handle_cast({store, Key, Value}, {Id, Counter, State, StoreTable, KBuckets}) ->
+    {noreply, {Id, State, StoreTable, KBuckets}};
+handle_cast({store, Key, Value}, {Id, State, StoreTable, KBuckets}) ->
     %io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
-    % Incrementa il contatore
-    NewCounter = Counter + 1,
+
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
     %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
     % Rispondi al client
-    {noreply, {Id, NewCounter, State, StoreTable, KBuckets}};
-handle_cast(republish, {Id, Counter, State, StoreTable, KBuckets}) ->
+    {noreply, {Id, State, StoreTable, KBuckets}};
+handle_cast(republish, {Id, State, StoreTable, KBuckets}) ->
     io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
     % 1. Ripubblica i dati
     republish_data(StoreTable, KBuckets),
     % 2. Reimposta il timer per la prossima ripubblicazione
     start_periodic_republish(self()),
-    {noreply, {Id, Counter, State, StoreTable, KBuckets}};
+    {noreply, {Id, State, StoreTable, KBuckets}};
 handle_cast(stop, State) ->
     {stop, normal, State};
 handle_cast(_Msg, State) ->
@@ -266,7 +284,7 @@ handle_info(_Info, State) ->
     {noreply, State}.
 
 terminate(_Reason, _State) ->
-    io:format("Kademlia node terminating~n"),
+    io:format("Kademlia node terminating~p~n", [_Reason]),
     ok.
 
 % ping() ->
@@ -315,8 +333,8 @@ read_store() ->
 find_node(PID, ToFindNodeId, RequestId) ->
     gen_server:call(PID, {find_node, ToFindNodeId, RequestId}).
 
-find_value(PID, Key, RequestId) ->
-    gen_server:call(PID, {find_value, Key, RequestId}).
+% find_value(PID, Key, RequestId) ->
+%     gen_server:call(PID, {find_value, Key, ParentPID, RequestId}).
 
 generate_node_id() ->
     % 1. Genera un intero casuale grande (64 bit)
@@ -456,7 +474,7 @@ republish_data(StoreTable, KBuckets) ->
             %     true ->
             %         io:format("Sono il pid 0.91.0, i nodi k trovati sono:~p", [ClosestNodes]);
             %     _ ->
-            %         A = 1
+            %         ok
             % end,
 
             % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
@@ -475,150 +493,174 @@ republish_data(StoreTable, KBuckets) ->
         end,
         Data
     ).
-%io:format("Ripubblicazione dati completata per il nodo con pid: ~p\n", [self()]).
 
-add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
-    %io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, BucketsReceived]),
-    % 1. Converte la tabella ETS dei buckets in una lista
-    BucketsReceivedList = ets:tab2list(BucketsReceived),
+add_nodes_to_kbuckets(Id, NodesListToAdd, MyKBuckets) ->
+    %io:format("Nodo ~p ricevuto sta per aggiungere questi nodi: ~p~n", [self(), NodesListToAdd]),
 
-    % 2. Itera sulla lista di buckets ricevuti dal nodo bootstrap
     lists:foreach(
-        fun({_, Nodes}) ->
-            % Itera sulla lista di nodi in ogni bucket
-            lists:foreach(
-                fun({NodePid, NodeId}) ->
-                    % Calcola la distanza tra il mio ID e l'ID del nodo corrente
-                    Distanza = calcola_distanza(Id, NodeId),
+        fun({NodePid, NodeId}) ->
+            % Calcola la distanza tra il mio ID e l'ID del nodo corrente
+            Distanza = calcola_distanza(Id, NodeId),
 
-                    case Distanza of
-                        0 ->
-                            % Non fare nulla, il nodo è se stesso
-                            ok;
-                        _ ->
-                            % Determina l'intervallo corretto per questa distanza
-                            RightKbucket = get_right_bucket_interval(Distanza, MyKBuckets),
+            case Distanza of
+                0 ->
+                    % Non fare nulla, il nodo è se stesso
+                    ok;
+                _ ->
+                    % Determina l'intervallo corretto per questa distanza
+                    RightKbucket = get_right_bucket_interval(Distanza, MyKBuckets),
 
-                            % Recupera i nodi attualmente presenti nel bucket corretto
-                            case RightKbucket of
-                                %false ->
-                                % io:format(
-                                %     "+++++ ERRORE: nessun bucket trovato per la distanza ~p (nodo ~p)~n",
-                                %     [Distanza, NodeId]
-                                % );
-                                {_, _} ->
-                                    [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
-                                    NewNodes =
-                                        case length(CurrentNodes) == ?K of
-                                            %se il bucket è pieno
-                                            true ->
-                                                %creo una nuova lista con i nodi che rispondono al ping
-                                                NewCurrentNodes = lists:foldl(
-                                                    fun({Pid, ID}, Acc) ->
-                                                        case ping(Pid) of
-                                                            {pong, _} ->
-                                                                [Acc | {Pid, ID}];
-                                                            _ ->
-                                                                Acc
-                                                        end
-                                                    end,
-                                                    [],
-                                                    CurrentNodes
-                                                ),
-                                                %se la nuova lista è ancora piena allora non aggiungere il nodo
-                                                %altrimenti aggiungilo in coda
-                                                case length(NewCurrentNodes) == ?K of
-                                                    true ->
-                                                        NewCurrentNodes;
+                    % Recupera i nodi attualmente presenti nel bucket corretto
+                    case RightKbucket of
+                        %false ->
+                        % io:format(
+                        %     "+++++ ERRORE: nessun bucket trovato per la distanza ~p (nodo ~p)~n",
+                        %     [Distanza, NodeId]
+                        % );
+                        {_, _} ->
+                            [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
+                            NewNodes =
+                                case length(CurrentNodes) == ?K of
+                                    %se il bucket è pieno
+                                    true ->
+                                        %creo una nuova lista con i nodi che rispondono al ping
+                                        NewCurrentNodes = lists:foldl(
+                                            fun({Pid, ID}, Acc) ->
+                                                case ping(Pid) of
+                                                    {pong, _} ->
+                                                        [Acc | {Pid, ID}];
                                                     _ ->
-                                                        NewCurrentNodes ++ [{NodePid, NodeId}]
-                                                end;
-                                            _ ->
-                                                % Aggiungi il nuovo nodo alla lista (se non è già presente)
-
-                                                case lists:keyfind(NodeId, 2, CurrentNodes) of
-                                                    % Non trovato, lo aggiunge
-                                                    false ->
-                                                        % io:format(
-                                                        %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
-                                                        %     [
-                                                        %         NodePid, NodeId, RightKbucket
-                                                        %     ]
-                                                        % ),
-                                                        CurrentNodes ++ [{NodePid, NodeId}];
-                                                    % Già presente, non fare nulla
-                                                    _ ->
-                                                        % io:format(
-                                                        %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
-                                                        %     [
-                                                        %         NodePid, NodeId, RightKbucket
-                                                        %     ]
-                                                        % ),
-                                                        CurrentNodes
+                                                        Acc
                                                 end
-                                        end,
+                                            end,
+                                            [],
+                                            CurrentNodes
+                                        ),
+                                        %se la nuova lista è ancora piena allora non aggiungere il nodo
+                                        %altrimenti aggiungilo in coda
+                                        case length(NewCurrentNodes) == ?K of
+                                            true ->
+                                                NewCurrentNodes;
+                                            _ ->
+                                                NewCurrentNodes ++ [{NodePid, NodeId}]
+                                        end;
+                                    _ ->
+                                        % Aggiungi il nuovo nodo alla lista (se non è già presente)
 
-                                    % Aggiorna la tabella ETS con i nuovi nodi nel bucket
-                                    ets:insert(MyKBuckets, {Key, NewNodes})
-                            end
+                                        case lists:keyfind(NodeId, 2, CurrentNodes) of
+                                            % Non trovato, lo aggiunge
+                                            false ->
+                                                % io:format(
+                                                %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
+                                                %     [
+                                                %         NodePid, NodeId, RightKbucket
+                                                %     ]
+                                                % ),
+                                                CurrentNodes ++ [{NodePid, NodeId}];
+                                            % Già presente, non fare nulla
+                                            _ ->
+                                                % io:format(
+                                                %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
+                                                %     [
+                                                %         NodePid, NodeId, RightKbucket
+                                                %     ]
+                                                % ),
+                                                CurrentNodes
+                                        end
+                                end,
+
+                            % Aggiorna la tabella ETS con i nuovi nodi nel bucket
+                            ets:insert(MyKBuckets, {Key, NewNodes})
                     end
-                end,
-                Nodes
-            )
+            end
         end,
-        BucketsReceivedList
+        NodesListToAdd
     ).
 
-%% Avvia più nodi Kademlia
-start_nodes(NumNodes) ->
-    start_nodes(NumNodes, {}).
+add_node_to_kbuckets(Id, NodeReceived, MyKBuckets) ->
+    %io:format("Nodo ~p ricevuto k_buckets ~p~n", [Id, BucketsReceived]),
+    {NodePid, NodeId} = NodeReceived,
 
-start_nodes(0, _) ->
-    ok;
-start_nodes(NumNodes, BootstrapNode) ->
-    Name = list_to_atom("knode_" ++ integer_to_list(NumNodes)),
-    case BootstrapNode of
-        % Primo nodo, diventa bootstrap
-        {} ->
-            start_link(Name, undefined),
-            start_nodes(NumNodes - 1, {Name, whereis(Name)});
-        % Nodi successivi, si connettono al bootstrap
-        {NameBootstrap, BootstrapNodePID} ->
-            start_link(Name, BootstrapNodePID),
-            start_nodes(NumNodes - 1, {NameBootstrap, BootstrapNodePID})
+    % Calcola la distanza tra il mio ID e l'ID del nodo corrente
+    Distanza = calcola_distanza(Id, NodeId),
+
+    case Distanza of
+        0 ->
+            % Non fare nulla, il nodo è se stesso
+            ok;
+        _ ->
+            % Determina l'intervallo corretto per questa distanza
+            RightKbucket = get_right_bucket_interval(Distanza, MyKBuckets),
+
+            % Recupera i nodi attualmente presenti nel bucket corretto
+            case RightKbucket of
+                {_, _} ->
+                    [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
+                    NewNodes =
+                        case length(CurrentNodes) == ?K of
+                            %se il bucket è pieno
+                            true ->
+                                %creo una nuova lista con i nodi che rispondono al ping
+                                NewCurrentNodes = lists:foldl(
+                                    fun({Pid, ID}, Acc) ->
+                                        case ping(Pid) of
+                                            {pong, _} ->
+                                                [Acc | {Pid, ID}];
+                                            _ ->
+                                                Acc
+                                        end
+                                    end,
+                                    [],
+                                    CurrentNodes
+                                ),
+                                %se la nuova lista è ancora piena allora non aggiungere il nodo
+                                %altrimenti aggiungilo in coda
+                                case length(NewCurrentNodes) == ?K of
+                                    true ->
+                                        NewCurrentNodes;
+                                    _ ->
+                                        NewCurrentNodes ++ [{NodePid, NodeId}]
+                                end;
+                            %se il kbucket non è pieno
+                            _ ->
+                                % Aggiungi il nuovo nodo alla lista (se non è già presente)
+                                case lists:keyfind(NodeId, 2, CurrentNodes) of
+                                    % Non trovato, lo aggiunge
+                                    false ->
+                                        % io:format(
+                                        %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
+                                        %     [
+                                        %         NodePid, NodeId, RightKbucket
+                                        %     ]
+                                        % ),
+                                        CurrentNodes ++ [{NodePid, NodeId}];
+                                    % Già presente, non fare nulla
+                                    _ ->
+                                        % io:format(
+                                        %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
+                                        %     [
+                                        %         NodePid, NodeId, RightKbucket
+                                        %     ]
+                                        % ),
+                                        CurrentNodes
+                                end
+                        end,
+
+                    % Aggiorna la tabella ETS con i nuovi nodi nel bucket
+                    ets:insert(MyKBuckets, {Key, NewNodes});
+                _ ->
+                    % io:format(
+                    %     "+++++ ERRORE: nessun bucket trovato per la distanza ~p (nodo ~p)~n",
+                    %     [Distanza, NodeId]
+                    % )
+                    {error, rightbucket_not_found}
+            end
     end.
 
-calcola_tempo_totale_find_value(Key) ->
-    NumNodes = 100,
-    ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
-    NodiETempi = [
-        {Node, Tempo}
-     || Node <- ListaNodi,
-        {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
-    ],
-    Tempi = [Tempo || {_, Tempo} <- NodiETempi],
-    Media = lists:sum(Tempi) / length(Tempi),
-    Percentuale = (length(Tempi) / NumNodes) * 100,
-    io:format("Media dei tempi: ~p~n", [Media]),
-    io:format("Percentuale nodi che hanno trovato il valore: ~p~n", [Percentuale]),
-    lists:foreach(
-        fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
-    ).
+find_node_iterative(AlphaClosestNodes, Key, ParentNode) ->
+    find_node_iterative(AlphaClosestNodes, Key, ParentNode, []).
 
-calcola_tempo(Node, Key) ->
-    Inizio = erlang:monotonic_time(microsecond),
-    Risultato = start_find_value_iterative(Node, Key),
-    Fine = erlang:monotonic_time(microsecond),
-    Tempo = Fine - Inizio,
-    case Risultato of
-        {found_value, Value, _} -> {ok, Value, Tempo};
-        _ -> false
-    end.
-
-find_node_iterative(AlphaClosestNodes, Key) ->
-    find_node_iterative(AlphaClosestNodes, Key, []).
-
-find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
+find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     case BestNodes == [] of
         %caso base
         true ->
@@ -639,7 +681,9 @@ find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     spawn(fun() ->
                         % Eseguo la richiesta al nodo
                         RequestId = generate_requestId(),
-                        Response = gen_server:call(PIDNodo, {find_node, Key, RequestId}),
+                        Response = gen_server:call(
+                            PIDNodo, {find_node, Key, ParentNode, RequestId}
+                        ),
                         %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
                         %allora manda invalid_request id, negli altri casi manda una response
                         case Response of
@@ -686,7 +730,7 @@ find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
 
             %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
             find_node_iterative(
-                lists:sublist(NewBestNodesNoSelf, ?A), Key, NewBestNodesWithDistance
+                lists:sublist(NewBestNodesNoSelf, ?A), Key, ParentNode, NewBestNodesWithDistance
             );
         %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
         %i processi alla prossima iterazione
@@ -707,7 +751,9 @@ find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     spawn(fun() ->
                         % Eseguo la richiesta al nodo
                         RequestId = generate_requestId(),
-                        Response = gen_server:call(PIDNodo, {find_node, Key, RequestId}),
+                        Response = gen_server:call(
+                            PIDNodo, {find_node, Key, ParentNode, RequestId}
+                        ),
                         %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
                         %allora manda invalid_request id, negli altri casi manda una response
                         case Response of
@@ -777,7 +823,7 @@ find_node_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     ),
 
                     find_node_iterative(
-                        lists:sublist(NewBestNodesNoSelf, ?A), Key, AllReceivedNodes
+                        lists:sublist(NewBestNodesNoSelf, ?A), Key, ParentNode, AllReceivedNodes
                     )
             end
     end.
@@ -800,22 +846,21 @@ receive_responses_find_node(N, Responses) ->
         % Ricevo una risposta e la aggiungo alla lista
     end.
 
-find_value_iterative(AlphaClosestNodes, Key) ->
-    find_value_iterative(AlphaClosestNodes, Key, []).
-find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
+find_value_iterative(AlphaClosestNodes, Key, ParentNode, ParentKBuckets) ->
+    find_value_iterative(AlphaClosestNodes, Key, ParentNode, ParentKBuckets, []).
+find_value_iterative(AlphaClosestNodes, Key, ParentNode, ParentKBuckets, BestNodes) ->
     case BestNodes == [] of
         %caso base
         true ->
             io:format("La lista:~p~n", [AlphaClosestNodes]),
-            %Creo la lista di soli pid dalla lista di tuple
             ParentPID = self(),
+            %Creo la lista di soli pid dalla lista di tuple
             AlphaClosestNodesPID = lists:map(
                 fun({PIDNodo, _}) ->
                     PIDNodo
                 end,
                 AlphaClosestNodes
             ),
-            %α
             % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
             lists:foreach(
                 fun(PIDNodo) ->
@@ -823,7 +868,10 @@ find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     spawn(fun() ->
                         % Eseguo la richiesta al nodo
                         RequestId = generate_requestId(),
-                        Response = gen_server:call(PIDNodo, {find_value, Key, RequestId}),
+
+                        Response = gen_server:call(
+                            PIDNodo, {find_value, Key, ParentNode, RequestId}
+                        ),
                         %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
                         %allora manda invalid_request id, negli altri casi manda una response
                         io:format("La risposta del PID ~p è ~p~n", [PIDNodo, Response]),
@@ -889,10 +937,18 @@ find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     NewBestNodesNoSelf = lists:filter(
                         fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes
                     ),
+                    {_, ParentID} = ParentNode,
+                    %Qui aggiorno i kbuckets,
+                    %NewBestNodesWithDistance non va bene così in ingresso
+                    add_nodes_to_kbuckets(ParentID, NewBestNodesWithDistance, ParentKBuckets),
 
                     %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
                     find_value_iterative(
-                        lists:sublist(NewBestNodesNoSelf, ?A), Key, NewBestNodesWithDistance
+                        lists:sublist(NewBestNodesNoSelf, ?A),
+                        Key,
+                        ParentNode,
+                        ParentKBuckets,
+                        NewBestNodesWithDistance
                     )
             end;
         %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
@@ -914,7 +970,9 @@ find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
                     spawn(fun() ->
                         % Eseguo la richiesta al nodo
                         RequestId = generate_requestId(),
-                        Response = gen_server:call(PIDNodo, {find_value, Key, RequestId}),
+                        Response = gen_server:call(
+                            PIDNodo, {find_value, Key, ParentNode, RequestId}
+                        ),
                         %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
                         %allora manda invalid_request id, negli altri casi manda una response
                         case Response of
@@ -1012,7 +1070,11 @@ find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
                             ),
 
                             find_value_iterative(
-                                lists:sublist(NewBestNodesNoSelf, ?A), Key, AllReceivedNodes
+                                lists:sublist(NewBestNodesNoSelf, ?A),
+                                Key,
+                                ParentNode,
+                                ParentKBuckets,
+                                AllReceivedNodes
                             )
                     end
             end
@@ -1052,7 +1114,8 @@ receive_responses_find_value(N, Responses) ->
         % Ricevo una risposta e la aggiungo alla lista
     end.
 
-%mando un messaggio al nodo che deve coordinare la routine iterativa della ricerca
+%mando un messaggio al nodo che deve coordinare la routine iterativa
+%della ricerca, comando per la shell in modo da testare il nodo
 start_find_node_iterative(NodePID, Key) ->
     RequestId = generate_requestId(),
     case gen_server:call(NodePID, {start_find_node_iterative, Key, RequestId}, timer:seconds(2)) of
@@ -1087,4 +1150,50 @@ start_find_value_iterative(NodePID, Key) ->
             end;
         _ ->
             {error, NodePID}
+    end.
+
+%% Avvia più nodi Kademlia per test
+start_nodes(NumNodes) ->
+    start_nodes(NumNodes, {}).
+
+start_nodes(0, _) ->
+    ok;
+start_nodes(NumNodes, BootstrapNode) ->
+    Name = list_to_atom("knode_" ++ integer_to_list(NumNodes)),
+    case BootstrapNode of
+        % Primo nodo, diventa bootstrap
+        {} ->
+            start_link(Name, undefined),
+            start_nodes(NumNodes - 1, {Name, whereis(Name)});
+        % Nodi successivi, si connettono al bootstrap
+        {NameBootstrap, BootstrapNodePID} ->
+            start_link(Name, BootstrapNodePID),
+            start_nodes(NumNodes - 1, {NameBootstrap, BootstrapNodePID})
+    end.
+
+calcola_tempo_totale_find_value(Key) ->
+    NumNodes = 100,
+    ListaNodi = [list_to_atom("knode_" ++ integer_to_list(N)) || N <- lists:seq(1, NumNodes)],
+    NodiETempi = [
+        {Node, Tempo}
+     || Node <- ListaNodi,
+        {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
+    ],
+    Tempi = [Tempo || {_, Tempo} <- NodiETempi],
+    Media = lists:sum(Tempi) / length(Tempi),
+    Percentuale = (length(Tempi) / NumNodes) * 100,
+    io:format("Media dei tempi: ~p~n", [Media]),
+    io:format("Percentuale nodi che hanno trovato il valore: ~p~n", [Percentuale]),
+    lists:foreach(
+        fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end, NodiETempi
+    ).
+
+calcola_tempo(Node, Key) ->
+    Inizio = erlang:monotonic_time(microsecond),
+    Risultato = start_find_value_iterative(Node, Key),
+    Fine = erlang:monotonic_time(microsecond),
+    Tempo = Fine - Inizio,
+    case Risultato of
+        {found_value, Value, _} -> {ok, Value, Tempo};
+        _ -> false
     end.
