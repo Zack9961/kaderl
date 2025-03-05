@@ -148,19 +148,37 @@ handle_call(
     %io:format("L'output di lookup è: ~p~n", [[{Key, CurrentNodes}]]),
 
     %aggiungo in coda
-    UpdatedNodes = CurrentNodes ++ [{PID, IdNewNode}],
+    %UpdatedNodes = CurrentNodes ++ [{PID, IdNewNode}],
 
     %Gestisco la dimensione massima del k-bucket
     NewNodes =
         if
-            length(UpdatedNodes) > ?K ->
-                % Rimuovi il nodo meno recentemente visto (alla testa della lista)
-                %Ricordarsi di aggiungere il ping, quindi di rimuoverlo se pingando non
-                %risponde, andando avanti per tutti i nodi seguenti, se tutti rispondono,
-                %non aggiungere il nodo
-                tl(UpdatedNodes);
+            %se il bucket è pieno
+            length(CurrentNodes) == ?K ->
+                %creo una nuova lista con i nodi che rispondono al ping
+                NewCurrentNodes = lists:foldl(
+                    fun({Pid, ID}, Acc) ->
+                        case ping(Pid) of
+                            {pong, _} ->
+                                [Acc | {Pid, ID}];
+                            _ ->
+                                Acc
+                        end
+                    end,
+                    [],
+                    CurrentNodes
+                ),
+                %se la nuova lista è ancora piena allora non aggiungere il nodo
+                %altrimenti aggiungilo in coda
+                case length(NewCurrentNodes) == ?K of
+                    true ->
+                        NewCurrentNodes;
+                    _ ->
+                        NewCurrentNodes ++ [{PID, IdNewNode}]
+                end;
+            %se il bucket non è pieno lo aggiungo in coda
             true ->
-                UpdatedNodes
+                CurrentNodes ++ [{PID, IdNewNode}]
         end,
 
     %Reinserisco la tupla aggiornata nel k-bucket
@@ -261,16 +279,22 @@ ping(PID) ->
         {pong, ReceiverPID, ReceiverRequestId} ->
             case RequestId == ReceiverRequestId of
                 true ->
-                    io:format("Node with PID ~p received pong from ~p~n", [self(), ReceiverPID]);
+                    io:format("Node with PID ~p received pong from ~p~n", [self(), ReceiverPID]),
+                    {pong, ReceiverPID};
                 _ ->
-                    io:format("Sono il nodo con pid ~p, requestId ricevuto da ~p non corretto ~n", [
-                        self(), ReceiverPID
-                    ])
+                    io:format(
+                        "Sono il nodo con pid ~p, requestId ricevuto da ~p non corretto ~n", [
+                            self(), ReceiverPID
+                        ]
+                    ),
+                    {invalid_requestid, ReceiverPID, ReceiverRequestId}
             end;
         {'EXIT', Reason} ->
-            io:format("Nodo con pid ~p non raggiungibile (~p)~n", [PID, Reason]);
+            io:format("Nodo con pid ~p non raggiungibile (~p)~n", [PID, Reason]),
+            {error, Reason};
         _ ->
-            io:format("Risposta non gestita")
+            io:format("Risposta non gestita"),
+            {error}
     end.
 
 stop() ->
@@ -437,7 +461,7 @@ republish_data(StoreTable, KBuckets) ->
 
             % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
             lists:foreach(
-                fun({NodePID, NodeId}) ->
+                fun({NodePID, _}) ->
                     %io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
                     % Invia la richiesta STORE in modo asincrono (cast) per non bloccare il processo di ripubblicazione
                     %NodePID ! {store, Key, Value}
@@ -484,41 +508,58 @@ add_nodes_to_kbuckets(Id, BucketsReceived, MyKBuckets) ->
                                 % );
                                 {_, _} ->
                                     [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
-
-                                    % Aggiungi il nuovo nodo alla lista (se non è già presente)
                                     NewNodes =
-                                        case lists:keyfind(NodeId, 2, CurrentNodes) of
-                                            % Non trovato, lo aggiunge
-                                            false ->
-                                                % io:format(
-                                                %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
-                                                %     [
-                                                %         NodePid, NodeId, RightKbucket
-                                                %     ]
-                                                % ),
-                                                CurrentNodes ++ [{NodePid, NodeId}];
-                                            % Già presente, non fare nulla
-                                            _ ->
-                                                % io:format(
-                                                %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
-                                                %     [
-                                                %         NodePid, NodeId, RightKbucket
-                                                %     ]
-                                                % ),
-                                                CurrentNodes
-                                        end,
-
-                                    % Gestisci la dimensione massima del k-bucket (se necessario)
-                                    NewNodesLimited =
-                                        if
-                                            length(NewNodes) > ?K ->
-                                                tl(NewNodes);
+                                        case length(CurrentNodes) == ?K of
+                                            %se il bucket è pieno
                                             true ->
-                                                NewNodes
+                                                %creo una nuova lista con i nodi che rispondono al ping
+                                                NewCurrentNodes = lists:foldl(
+                                                    fun({Pid, ID}, Acc) ->
+                                                        case ping(Pid) of
+                                                            {pong, _} ->
+                                                                [Acc | {Pid, ID}];
+                                                            _ ->
+                                                                Acc
+                                                        end
+                                                    end,
+                                                    [],
+                                                    CurrentNodes
+                                                ),
+                                                %se la nuova lista è ancora piena allora non aggiungere il nodo
+                                                %altrimenti aggiungilo in coda
+                                                case length(NewCurrentNodes) == ?K of
+                                                    true ->
+                                                        NewCurrentNodes;
+                                                    _ ->
+                                                        NewCurrentNodes ++ [{NodePid, NodeId}]
+                                                end;
+                                            _ ->
+                                                % Aggiungi il nuovo nodo alla lista (se non è già presente)
+
+                                                case lists:keyfind(NodeId, 2, CurrentNodes) of
+                                                    % Non trovato, lo aggiunge
+                                                    false ->
+                                                        % io:format(
+                                                        %     "+++++ Aggiungo nodo ~p (id ~p) al bucket ~p~n",
+                                                        %     [
+                                                        %         NodePid, NodeId, RightKbucket
+                                                        %     ]
+                                                        % ),
+                                                        CurrentNodes ++ [{NodePid, NodeId}];
+                                                    % Già presente, non fare nulla
+                                                    _ ->
+                                                        % io:format(
+                                                        %     "+++++ Nodo ~p (id ~p) già presente nel bucket ~p~n",
+                                                        %     [
+                                                        %         NodePid, NodeId, RightKbucket
+                                                        %     ]
+                                                        % ),
+                                                        CurrentNodes
+                                                end
                                         end,
 
                                     % Aggiorna la tabella ETS con i nuovi nodi nel bucket
-                                    ets:insert(MyKBuckets, {Key, NewNodesLimited})
+                                    ets:insert(MyKBuckets, {Key, NewNodes})
                             end
                     end
                 end,
@@ -938,19 +979,24 @@ find_value_iterative(AlphaClosestNodes, Key, BestNodes) ->
                         [ParentPID, NewBestNodesWithDistance, BestNodes]
                     ),
 
-                    %forse per far convergere devo mettere come argomento tutti i nodi che sono stati trovati
-                    %e se i nuovi nodi trovati sono un sottoinsieme di tutti i nodi trovati allora converge
-
+                    %controllo se i nodi che ho trovato sono un sottoinsieme dei nodi trovati in precedenze
+                    %se lo sono allora termino l'esecuzione e restituisco i migliori nodi trovati fino ad ora
+                    %altrimenti aggiungo i nodi appena trovati alla lista di tutti i nodi trovati,
+                    %e faccio partire la nuova iterazione della funzione mettendo come argomento i primi alpha
+                    %nodi, la chiave e tutti i nodi trovati fino ad ora
                     case
                         lists:all(
                             fun(X) -> lists:member(X, BestNodes) end, NewBestNodesWithDistance
                         )
                     of
+                        %non ho trovato i nodi più vicini, restituisco i migliori nodi trovati
                         true ->
-                            %ho trovato i nodi più vicini
                             %io:format("non ho trovato nodi più vicini"),
                             lists:sublist(BestNodes, ?K);
+                        %ho trovato nodi mai trovati prima, continuo con l'iterazione
                         _ ->
+                            %aggiungo i nuovi nodi trovati alla lista di tutti i nodi
+                            %trovati, tolgo i doppioni e riordino la lista
                             AllReceivedNodesWithDuplicates = NewBestNodesWithDistance ++ BestNodes,
                             AllReceivedNodesNosort = ordsets:to_list(
                                 ordsets:from_list(AllReceivedNodesWithDuplicates)
