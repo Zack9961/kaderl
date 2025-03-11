@@ -1,16 +1,12 @@
 -module(knode).
 -behaviour(gen_server).
 -include_lib("stdlib/include/ms_transform.hrl").
--define(K, 20).
+-define(K, 2).
 -define(T, 3600).
 -define(A, 3).
 -export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
     stop/0,
-    %get_id/1,
-    %read_store/0,
-    %find_node/3,
-    %find_value/3,
     ping/1,
     find_value_iterative/3,
     find_node_iterative/3,
@@ -50,17 +46,9 @@ init(State) ->
             of
                 {k_buckets, ClosestNodesReceived, BootstrapID, RequestIdReceived} ->
                     % Nodo bootstrap raggiungibile, procedo normalmente
-                    % io:format("Nodo bootstrap ~p risponde, ID: ~p~n", [
-                    %     BootstrapNodePID, BootstrapID
-                    % ]),
-                    %Controllo se il requestId è corretto
                     case RequestId == RequestIdReceived of
                         true ->
                             BootstrapNode = {BootstrapNodePID, BootstrapID},
-
-                            % add_bootstrap_node_in_kbuckets(
-                            %     BootstrapNodePID, KBuckets, Id, BootstrapID
-                            % ),
 
                             %aggiungo il nodo bootstrap  e i suoi nodi
                             %mandati in risposta ai miei KBuckets
@@ -69,82 +57,47 @@ init(State) ->
                             ),
                             {ok, NewState};
                         _ ->
-                            % io:format("Sono il nodo con pid: ~p Request Id non corretto~n", [
-                            %     BootstrapNodePID
-                            % ]),
                             {ok, NewState}
                     end;
                 _ ->
                     % Nodo bootstrap non raggiungibile, divento bootstrap
-                    % io:format("Nodo bootstrap ~p non raggiungibile (~p), divento bootstrap~n", [
-                    %     BootstrapNodePID, Reason
-                    % ]),
                     {ok, NewState}
             end
     end.
 handle_call({ping, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
-    %{PID, _} = _From,
     %io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
     {reply, {pong, self(), RequestId}, {Id, State, StoreTable, KBuckets}};
-handle_call({get_alpha_nodes, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
-    KBucketsList = ets:tab2list(KBuckets),
-    KClosestNodes = find_closest_nodes(Key, KBucketsList),
-    AlphaClosestNodes = lists:sublist(KClosestNodes, ?A),
-    {reply, {alpha_nodes, AlphaClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}};
-%Funzione cancellabile?
-handle_call({read_store, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
-    %io:format("Received read_store request from ~p,~p~n", [_From, Id]),
-    % Leggi la tabella ETS
-    Tuples = ets:tab2list(StoreTable),
-    %io:format("Table content: ~p~n", [Tuples]),
-    {reply, {Tuples, RequestId}, {Id, State, StoreTable, KBuckets}};
 handle_call(
     {find_node, ToFindNodeId, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
-    %{PID, _} = _From,
-    %io:format("Node ~p (~p) received FIND_NODE request for ID ~p from ~p~n", [
-    %    self(), Id, ToFindNodeId, PID
-    %]),
-
     %ParentNode perché se prendessi le informazioni da _From sarebbero
     %le informazioni del processo generato da spawn e non del nodo
     %che invia la richiesta direttamente
-
     %provo ad aggiungere il nodo che mi ha inviato la richiesta ai miei kbuckets
-    %add_node_to_kbuckets(Id, ParentNode, KBuckets),
-    %mando un messaggio cast
+    %mandandomi un messaggio cast
     gen_server:cast(self(), {add_nodes_to_kbuckets, [ParentNode]}),
 
     % Recupera i k-bucket dalla tabella ETS
     KBucketsList = ets:tab2list(KBuckets),
-    % Cerco i nodi più vicini nei miei kbucketss
+    % Cerco i nodi più vicini nei miei kbuckets
     ClosestNodes = find_closest_nodes(ToFindNodeId, KBucketsList),
     % Rispondi al nodo richiedente con la lista dei nodi più vicini
     {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}};
 handle_call(
     {find_value, Key, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
 ) ->
-    %{PID, _} = _From,
-    % io:format("Node ~p (~p) received FIND_VALUE request for Key ~p from pid: ~p~n", [
-    %     self(), Id, Key, ParentPID
-    % ]),
-
     %Aggiungo il ParentNode, nei miei kbuckets
     gen_server:cast(self(), {add_nodes_to_kbuckets, [ParentNode]}),
-    %add_node_to_kbuckets(Id, ParentNode, KBuckets),
 
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
-            %io:format("Nodo ~p trova il valore ~p", [self(), Key]),
             {reply, {found_value, Value, RequestId}, {Id, State, StoreTable, KBuckets}};
-        %PID ! {found_value, Value};
         [] ->
             % Il nodo non ha il valore, restituisce i nodi più vicini
             KBucketsList = ets:tab2list(KBuckets),
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
             {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}}
-        %PID ! {found_nodes, ClosestNodes}
     end;
 handle_call(
     {join_request, IdNewNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
@@ -165,7 +118,6 @@ handle_call(
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
     ClosestNodes = find_closest_nodes(Key, KBucketsList),
-    %io:format("I nodi più vicini trovati sono:~p~n", [ClosestNodes]),
     %Scelgo alpha nodi da interrogare in parallelo
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
 
@@ -184,15 +136,12 @@ handle_call(
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
     ClosestNodes = find_closest_nodes(Key, KBucketsList),
-    %io:format("I nodi più vicini trovati sono:~p~n", [ClosestNodes]),
     %Scelgo alpha nodi da interrogare in parallelo
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
-
     %Quindi faccio partire la funzione find_value_iterative
     ParentNode = {self(), Id},
-    IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
 
-    %io:format("IterativeFound è :~p~n", [IterativeFound]),
+    IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
 
     case IterativeFound of
         {found_value, Value} ->
@@ -205,37 +154,26 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 handle_cast({store, Value}, {Id, State, StoreTable, KBuckets}) ->
-    %io:format("Received store request: Id=~p, Value=~p, From=?~n", [Id, Value]),
     %Calcola la key
     HashValue = crypto:hash(sha, integer_to_binary(Value)),
     Key = binary_to_integer_representation(HashValue),
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
-    % Rispondi al client
     {noreply, {Id, State, StoreTable, KBuckets}};
 handle_cast({store, Key, Value}, {Id, State, StoreTable, KBuckets}) ->
-    %io:format("Received store request: Id=~p Key=~p, Value=~p, From=?~n", [Id, Key, Value]),
-
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    %io:format("Inserted in ETS: Key=~p, Value=~p~n", [Key, Value]),
-    % Rispondi al client
     {noreply, {Id, State, StoreTable, KBuckets}};
 handle_cast(republish_data_refresh_kbuckets, {Id, State, StoreTable, KBuckets}) ->
     %io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
     republish_data(StoreTable, KBuckets),
     %refresh_kbuckets(Id, KBuckets),
-    %se per i test metto un tempo basso allora lo commento
-    %così non succede di continuo ma solo la prima volta
-    %altrimenti lo posso decommentare
     start_periodic_republish(self()),
     {noreply, {Id, State, StoreTable, KBuckets}};
 % handle_cast(refresh_kbuckets, {Id, State, StoreTable, KBuckets}) ->
 %     %io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
 %     {noreply, {Id, State, StoreTable, KBuckets}};
 handle_cast({add_nodes_to_kbuckets, NodesToAdd}, {Id, State, StoreTable, KBuckets}) ->
-    %io:format("~p~n", [self()]),
     add_nodes_to_kbuckets(Id, NodesToAdd, KBuckets),
     {noreply, {Id, State, StoreTable, KBuckets}};
 handle_cast(stop, State) ->
@@ -252,28 +190,17 @@ terminate(_Reason, _State) ->
     %io:format("Kademlia node ~p terminating ~p~n", [self(), _Reason]),
     ok.
 
-% ping() ->
-%     gen_server:call(?MODULE, {ping, self()}).
-
 ping(PID) ->
-    %ets:insert(KBuckets, {{nuhu, vv}, []}),
     RequestId = generate_requestId(),
     case (catch gen_server:call(PID, {ping, RequestId}, 2000)) of
         {pong, ReceiverPID, ReceiverRequestId} ->
             case RequestId == ReceiverRequestId of
                 true ->
-                    %io:format("Node with PID ~p received pong from ~p~n", [self(), ReceiverPID]),
                     {pong, ReceiverPID};
                 _ ->
-                    % io:format(
-                    %     "Sono il nodo con pid ~p, requestId ricevuto da ~p non corretto ~n", [
-                    %         self(), ReceiverPID
-                    %     ]
-                    % ),
                     {invalid_requestid, ReceiverPID, ReceiverRequestId}
             end;
         {'EXIT', Reason} ->
-            %io:format("Nodo con pid ~p non raggiungibile (~p)~n", [PID, Reason]),
             {error, Reason};
         _ ->
             io:format("Risposta non gestita"),
@@ -283,25 +210,8 @@ ping(PID) ->
 stop() ->
     gen_server:cast(?MODULE, stop).
 
-% get_id(PID) ->
-%     gen_server:call(PID, get_id, 2000).
-
-% store(Key, Value) ->
-%     gen_server:cast(?MODULE, {store, Key, Value}).
-
 store(PID, Key, Value) ->
     gen_server:cast(PID, {store, Key, Value}).
-
-%send_add_nodes_to_kbuckets_request() ->
-
-% read_store() ->
-%     gen_server:call(?MODULE, read_store).
-
-% find_node(PID, ToFindNodeId, RequestId) ->
-%     gen_server:call(PID, {find_node, ToFindNodeId, RequestId}).
-
-% find_value(PID, Key, RequestId) ->
-%     gen_server:call(PID, {find_value, Key, ParentPID, RequestId}).
 
 generate_node_id() ->
     % 1. Genera un intero casuale grande (64 bit)
@@ -336,30 +246,22 @@ calcola_distanza(Id1, Id2) ->
 
 find_closest_nodes(Key, KBucketsList) ->
     %Controllare che sia un ID quindi fare check del formato
-    % 1. Ottieni tutti i nodi dai k-buckets.
+    % Ottiengo tutti i nodi dai k-buckets.
     Nodi = get_all_nodes_from_kbuckets(KBucketsList),
-    %io:format("Nodi estratti: ~p~n", [Nodi]),
 
-    % 2. Calcola la distanza di ogni nodo rispetto a ToFindNodeId
+    % Calcolo la distanza di ogni nodo rispetto a Key
     NodiConDistanza = aggiungi_distanza(Nodi, Key),
-    %io:format("Nodi con distanza: ~p~n", [NodiConDistanza]),
 
-    % NodiConDistanzaNo0 = lists:filter(fun({_, _, X}) -> X =/= 0 end, NodiConDistanza),
-    % io:format("Nodi con distanza senza 0: ~p~n", [NodiConDistanzaNo0]),
-
-    % 3. Ordina i nodi per distanza crescente.
+    % Ordino i nodi per distanza crescente
     NodiOrdinati = lists:sort(
         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
     ),
-    %io:format("Nodi ordinati: ~p~n", [NodiOrdinati]),
 
-    % 4. Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+    % Restituisco i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
     KClosestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
     KClosestNodes = lists:map(
         fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, KClosestNodesWithDistance
     ),
-
-    %io:format("Nodi più vicini (limitati a K e senza distanza): ~p~n", [KClosestNodes]),
     KClosestNodes.
 
 get_all_nodes_from_kbuckets(BucketsList) ->
@@ -396,33 +298,20 @@ binary_to_integer_representation(Binary) ->
     lists:foldl(fun(Byte, Acc) -> (Acc bsl 8) bor Byte end, 0, Bytes).
 
 start_periodic_republish(NodePID) ->
-    %io:format("Sono il nodo con pid: ~p, start_periodic_republish...~n", [self()]),
-    %erlang:send_after(timer:seconds(?T), NodePID, republish).
     timer:apply_after(timer:seconds(?T), gen_server, cast, [
         NodePID, republish_data_refresh_kbuckets
     ]).
-% timer:apply_after(timer:seconds(?T), gen_server, cast, [NodePID, refresh_kbuckets]),
-% timer:apply_after(timer:seconds(?T), knode, start_periodic_republish, NodePID).
 
 republish_data(StoreTable, KBuckets) ->
-    %io:format("Sono il nodo con pid: ~p, sto ripubblicando i dati...~n", [self()]),
-
-    % 1. Ottieni tutti i dati (coppie chiave-valore) dalla tabella ETS (StoreTable).
+    % Ottengo tutti i dati dalla tabella ETS (StoreTable).
     Data = ets:tab2list(StoreTable),
-    %io:format("Dati da ripubblicare: ~p\n", [Data]),
-
-    % 2. Ottieni la lista dei k-buckets
+    % Ottengo la lista dei k-buckets
     KBucketsList = ets:tab2list(KBuckets),
-
-    % 3. Per ogni dato (coppia chiave-valore):
     lists:foreach(
         fun({Key, Value}) ->
-            %io:format("Ripubblicazione della chiave ~p\n", [Key]),
-
-            % 4. Trova i k nodi più vicini alla chiave.
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
 
-            % 5. Invia una richiesta STORE a ciascuno dei k nodi più vicini.
+            % Invio una richiesta STORE a ciascuno dei k nodi più vicini.
             lists:foreach(
                 fun({NodePID, _}) ->
                     %io:format("Invio richiesta STORE a nodo ~p (ID: ~p)\n", [NodePID, NodeId]),
@@ -434,29 +323,26 @@ republish_data(StoreTable, KBuckets) ->
         Data
     ).
 
-refresh_kbuckets(MyId, KBuckets) ->
-    KBucketsList = ets:tab2list(KBuckets),
-    % Genera un numero tra 0 e 159
-    RandomBucketIndex = rand:uniform(160) - 1,
-    {LowerBound, UpperBound} = get_kbucket_range(RandomBucketIndex),
-    RandomId = LowerBound + rand:uniform(UpperBound - LowerBound + 1) - 1,
-    %Cerco gli alpha nodi più vicini a cui mandare la ricerca iterativa della find_node
-    ClosestNodes = find_closest_nodes(RandomId, KBucketsList),
-    AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
-    %una volta trovati avvio la ricerca
-    find_node_iterative(AlphaClosestNodes, RandomId, {self(), MyId}).
+% refresh_kbuckets(MyId, KBuckets) ->
+%     KBucketsList = ets:tab2list(KBuckets),
+%     % Genera un numero tra 0 e 159
+%     RandomBucketIndex = rand:uniform(160) - 1,
+%     {LowerBound, UpperBound} = get_kbucket_range(RandomBucketIndex),
+%     RandomId = LowerBound + rand:uniform(UpperBound - LowerBound + 1) - 1,
+%     %Cerco gli alpha nodi più vicini a cui mandare la ricerca iterativa della find_node
+%     ClosestNodes = find_closest_nodes(RandomId, KBucketsList),
+%     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
+%     %una volta trovati avvio la ricerca
+%     find_node_iterative(AlphaClosestNodes, RandomId, {self(), MyId}).
 
-get_kbucket_range(Index) ->
-    LowerBound = 1 bsl Index,
-    UpperBound = (1 bsl (Index + 1)) - 1,
-    {LowerBound, UpperBound}.
+% get_kbucket_range(Index) ->
+%     LowerBound = 1 bsl Index,
+%     UpperBound = (1 bsl (Index + 1)) - 1,
+%     {LowerBound, UpperBound}.
 
 add_nodes_to_kbuckets(Id, NodesListToAdd, MyKBuckets) ->
-    %io:format("Nodo ~p ricevuto sta per aggiungere questi nodi: ~p~n", [self(), NodesListToAdd]),
-
     lists:foreach(
         fun({NodeToAddPid, NodeToAddId}) ->
-            % Calcola la distanza tra il mio ID e l'ID del nodo corrente
             Distanza = calcola_distanza(Id, NodeToAddId),
 
             case Distanza of
@@ -464,10 +350,10 @@ add_nodes_to_kbuckets(Id, NodesListToAdd, MyKBuckets) ->
                     % Non fare nulla, il nodo è se stesso
                     ok;
                 _ ->
-                    % Determina l'intervallo corretto per questa distanza
+                    % Determino l'intervallo corretto per questa distanza
                     RightKbucket = get_right_bucket_interval(Distanza, MyKBuckets),
 
-                    % Recupera i nodi attualmente presenti nel bucket corretto
+                    % Recupero i nodi attualmente presenti nel bucket corretto
                     case RightKbucket of
                         {_, _} ->
                             [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
@@ -517,10 +403,6 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     case BestNodes == [] of
         %caso base
         true ->
-            % io:format("La lista degli alpha nodi che sto per interrogare è:~p~n", [
-            %     AlphaClosestNodes
-            % ]),
-
             Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
 
             %Qui aggiungo anche i nodi che ho interrogato
@@ -575,18 +457,11 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
 
             % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
             NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
-            % NewBestNodes = lists:map(
-            %     fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
-            % ),
-            % io:format(
-            %     "La lista dei kclosest appena trovata da~p è:~p, mentre quella dei bestnodes è: ~p~n ",
-            %     [ParentPID, NewBestNodesWithDistance, BestNodes]
-            % ),
 
             case lists:all(fun(X) -> lists:member(X, BestNodes) end, NewBestNodesWithDistance) of
                 true ->
-                    %non ho trovato i nodi più vicini
-                    %io:format("non ho trovato nodi più vicini"),
+                    %non ho trovato i nodi più vicini,
+                    % restituisco i nodi migliori trovati
                     lists:sublist(BestNodes, ?K);
                 _ ->
                     %aggiungo i nuovi nodi trovati alla lista di tutti i nodi
@@ -629,13 +504,10 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     end.
 
 receive_responses_find_node(0, Responses) ->
-    % Ho ricevuto tutte le risposte, posso elaborarle
-    %elaborate_responses(Responses);
     lists:flatten(Responses);
 receive_responses_find_node(N, Responses) ->
     receive
         {ok, Response} ->
-            %io:format("Risposta numero: ~p nodo:~p~n", [N, self()]),
             case Response of
                 {found_nodes, NodeList, _} ->
                     receive_responses_find_node(N - 1, [NodeList | Responses]);
@@ -647,8 +519,6 @@ receive_responses_find_node(N, Responses) ->
         _ ->
             receive_responses_find_value(N - 1, [Responses])
     after 2000 ->
-        %io:format("timeout numero: ~p nodo:~p~n", [N, self()]),
-
         %Se va in timeout ignoro e vado avanti
         receive_responses_find_node(N - 1, [Responses])
     end.
@@ -660,9 +530,7 @@ find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID) ->
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            % Utilizzo di erlang:spawn/3 per eseguire la richiesta in un nuovo processo
             spawn(fun() ->
-                % Eseguo la richiesta al nodo
                 RequestId = generate_requestId(),
                 Response =
                     (catch gen_server:call(
@@ -695,14 +563,10 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     case BestNodes == [] of
         %caso base
         true ->
-            % io:format("La lista degli alpha nodi che sto per interrogare è:~p~n", [
-            %     AlphaClosestNodes
-            % ]),
-
             %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
             Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
 
-            %qui faccio l'if, se ho trovato il valore ritorno direttamente il valore altrimenti
+            %se ho trovato il valore ritorno direttamente il valore altrimenti
             %come find_node
             case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
                 true ->
@@ -711,7 +575,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     ),
                     Value;
                 _ ->
-                    %Qui aggiungo anche i nodi che ho interrogato
+                    %Aggiungo anche i nodi che ho interrogato
                     ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
 
                     NoDuplicatedList = ordsets:to_list(
@@ -776,13 +640,6 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
 
                     % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
                     NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
-                    % NewBestNodes = lists:map(
-                    %     fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
-                    % ),
-                    % io:format(
-                    %     "La lista dei kclosest appena trovata da~p è:~p, mentre quella dei bestnodes è: ~p~n ",
-                    %     [ParentPID, NewBestNodesWithDistance, BestNodes]
-                    % ),
 
                     %controllo se i nodi che ho trovato sono un sottoinsieme dei nodi trovati in precedenze
                     %se lo sono allora termino l'esecuzione e restituisco i migliori nodi trovati fino ad ora
@@ -796,7 +653,6 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     of
                         %non ho trovato i nodi più vicini, restituisco i migliori nodi trovati
                         true ->
-                            %io:format("non ho trovato nodi più vicini"),
                             lists:sublist(BestNodes, ?K);
                         %ho trovato nodi mai trovati prima, continuo con l'iterazione
                         _ ->
@@ -846,10 +702,6 @@ receive_responses_find_value(0, Responses) ->
 receive_responses_find_value(N, Responses) ->
     receive
         {found_nodes, Response} ->
-            % io:format(
-            %     "Sono il processo numero ~p e ho trovato nodi: ~p~n ",
-            %     [N, Response]
-            % ),
             case Response of
                 {found_nodes, NodeList, _} ->
                     receive_responses_find_value(N - 1, [NodeList | Responses]);
@@ -857,10 +709,6 @@ receive_responses_find_value(N, Responses) ->
                     receive_responses_find_value(N - 1, [Responses])
             end;
         {found_value, Response} ->
-            % io:format(
-            %     "Sono il processo numero ~p e ho trovato il valore: ~p~n ",
-            %     [N, Response]
-            % ),
             case Response of
                 %Se la risposta è del tipo giusto aggiungo il valore alla lista di risposte
                 {found_value, Value, _} ->
@@ -884,9 +732,7 @@ find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID) ->
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            % Utilizzo spawn/3 per eseguire la richiesta in un nuovo processo
             spawn(fun() ->
-                % Eseguo la richiesta al nodo
                 RequestId = generate_requestId(),
                 Response =
                     (catch gen_server:call(
@@ -911,7 +757,6 @@ find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID) ->
                                 ParentPID ! {invalid_requestid, Response}
                         end;
                     _ ->
-                        %io:format("timeout, sono un processo del nodo:~p~n", [ParentPID]),
                         ParentPID ! {ok, Response}
                 end
             end)
@@ -963,7 +808,6 @@ start_find_value_iterative(NodePID, Key) ->
                     {error, invalid_requestid, NodePID}
             end;
         _ ->
-            %io:format("timeout del nodo che deve fare l'terazione:~p~n", [NodePID]),
             {error, NodePID}
     end.
 
@@ -988,7 +832,6 @@ start_nodes(NumNodes, BootstrapNode) ->
 calcola_tempo_totale_find_value(_, _, 0) ->
     ok;
 calcola_tempo_totale_find_value(NodesToKillPerIteration, Key, NumNodes) ->
-    %NodesForIteration = NumNodes / NumberIterations,
     %start_nodes(NumNodes),
     %NumNodes = 100,
     gen_server:cast(knode_1, {store, 123}),
@@ -1027,7 +870,6 @@ calcola_tempo_totale_find_value(NodesToKillPerIteration, Key, NumNodes) ->
             round(NumNodes)
         )
     ),
-    %io:format("Iterazione"),
     NewNumNodes = NumNodes - NodesToKillPerIteration,
     %se è rimasto solo un nodo allora ferma l'iterazione
     case NewNumNodes > 1 of
