@@ -397,7 +397,6 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode) ->
 find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
     case BestNodes == [] of
-        %caso base
         true ->
             Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
 
@@ -423,7 +422,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
             ),
 
             %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
-            %dato che sono nel caso base, passo come argomento solo i nodi migliori
+            %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
             %che ho appena trovato (NewBestNodes), dato che non ne ho altri
             gen_server:cast(ParentPID, {add_nodes_to_kbuckets, NewBestNodes}),
 
@@ -557,7 +556,6 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode) ->
 find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
     case BestNodes == [] of
-        %caso base
         true ->
             %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
             Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
@@ -595,7 +593,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     ),
 
                     %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
-                    %dato che sono nel caso base, passo come argomento solo i nodi migliori
+                    %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
                     %che ho appena trovato (NewBestNodes), dato che non ne ho altri
                     gen_server:cast(ParentPID, {add_nodes_to_kbuckets, NewBestNodes}),
 
@@ -899,7 +897,6 @@ calcola_tempo_totale_find_value2(NumNodesToKillPerIter, Key, NumNodes) ->
 
 calcola_tempo_totale_find_value2(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
     case NodesKilled of
-        %caso base
         [] ->
             start_nodes(NumNodes),
             %aggiungo il valore ad un nodo a caso poi aspetto che facciano la republish 10 volte
@@ -917,7 +914,7 @@ calcola_tempo_totale_find_value2(NumNodesToKillPerIter, Key, NumNodes, NodesKill
             start_routine_find_value_iterative(ListaNodi, Key),
             %Prendo dei nodi a caso e li uccido, il numero di questo nodi a caso viene scelto da NodesToKillPerIteration
             NodesToKill = select_random_tuples(ListaNodi, NumNodesToKillPerIter),
-            io:format("NodesToKill:~p~n", [NodesToKill]),
+            %io:format("NodesToKill:~p~n", [NodesToKill]),
             lists:foreach(
                 fun({Num, _}) ->
                     gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
@@ -938,25 +935,36 @@ calcola_tempo_totale_find_value2(NumNodesToKillPerIter, Key, NumNodes, NodesKill
                 {N, list_to_atom("knode_" ++ integer_to_list(N))}
              || N <- lists:seq(1, NumNodes)
             ],
+            io:format("NodesKilled: ~p~n", [NodesKilled]),
             %prendo i nodi che non sono nella lista dei NodesKilled
             SurvidedNodes = ListaNodi -- NodesKilled,
+            io:format("SurvidedNodes: ~p~n", [SurvidedNodes]),
+
             %faccio la routine della find_value_iterative
             start_routine_find_value_iterative(SurvidedNodes, Key),
 
-            case SurvidedNodes =< NumNodesToKillPerIter of
+            case length(SurvidedNodes) =< NumNodesToKillPerIter of
                 %i nodi da uccidere sono di più o uguali ai nodi rimasti
                 true ->
-                    %seleziono e uccido tutti i nodi tranne uno (il primo)
-                    NodesToKill = tl(SurvidedNodes),
-                    lists:foreach(
-                        fun({Num, _}) ->
-                            gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
-                        end,
-                        NodesToKill
-                    ),
-                    %eseguo per l'ultima volta la routine per i tempi dato che la eseguo ad un nodo solo
-                    io:format("Primo nodo sopravvissuto: ~p~n", [[hd(SurvidedNodes)]]),
-                    start_routine_find_value_iterative([hd(SurvidedNodes)], Key);
+                    case length(SurvidedNodes) == 1 of
+                        true ->
+                            ok;
+                        _ ->
+                            %seleziono e uccido tutti i nodi tranne uno (il primo)
+                            NodesToKill = tl(SurvidedNodes),
+                            io:format("NodesToKill: ~p~n", [NodesToKill]),
+                            lists:foreach(
+                                fun({Num, _}) ->
+                                    gen_server:cast(
+                                        list_to_atom("knode_" ++ integer_to_list(Num)), stop
+                                    )
+                                end,
+                                NodesToKill
+                            ),
+                            %eseguo per l'ultima volta la routine per i tempi dato che la eseguo ad un nodo solo
+                            io:format("Primo nodo sopravvissuto: ~p~n", [[hd(SurvidedNodes)]]),
+                            start_routine_find_value_iterative([hd(SurvidedNodes)], Key)
+                    end;
                 _ ->
                     %riprendo dei nodi a caso e li uccido
                     NodesToKill = select_random_tuples(SurvidedNodes, NumNodesToKillPerIter),
@@ -991,37 +999,6 @@ start_routine_find_value_iterative(ListaNodi, Key) ->
     Media = round(lists:sum(Tempi) / length(Tempi)),
 
     io:format("Media dei tempi: ~p, su ~p nodi totali~n", [Media, length(ListaNodi)]).
-% io:format("Percentuale nodi che hanno trovato il valore: ~p, su ~p nodi totali ~n", [
-%     Percentuale, length(ListaNodi)
-% ])
-
-%****************ROBA VECCHIA********%
-
-% NodiETempi = [
-%     {Node, Tempo}
-%  || Node <- ListaNodi,
-%     {ok, _, Tempo} <- [calcola_tempo(Node, Key)]
-% ],
-% Tempi = [Tempo || {_, Tempo} <- NodiETempi],
-% %io:format("nodietempi~p~n", [NodiETempi]),
-% %io:format("tempi:~p~n", [Tempi]),
-% case Tempi of
-%     [] ->
-%         io:format("Nessun nodo ha trovato il valore, su ~p nodi totali~n", [length(ListaNodi)]);
-%     _ ->
-%         Media = round(lists:sum(Tempi) / length(Tempi)),
-%         %arrotondo ad un decimale
-%         Percentuale = round((length(Tempi) / length(ListaNodi)) * 100 * 10) / 10,
-
-%         io:format("Media dei tempi: ~p~n", [Media]),
-%         io:format("Percentuale nodi che hanno trovato il valore: ~p, su ~p nodi totali ~n", [
-%             Percentuale, length(ListaNodi)
-%         ])
-%     % lists:foreach(
-%     %     fun({Node, Tempo}) -> io:format("Nodo: ~p, Tempo: ~p~n", [Node, Tempo]) end,
-%     %     NodiETempi
-%     % )
-% end.
 
 select_random_tuples(List, Num) ->
     select_random_tuples(List, Num, []).
