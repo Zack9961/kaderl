@@ -1,0 +1,3 @@
+-define(K, 20).
+-define(T, 3).
+-define(A, 3).
