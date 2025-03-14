@@ -47,7 +47,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
             %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
             %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
             %che ho appena trovato (NewBestNodes), dato che non ne ho altri
-            add_nodes_to_kbuckets_cast(ParentPID, NewBestNodes),
+            add_nodes_to_kbuckets_cast(ParentPID, Responses),
 
             %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
             find_node_iterative(
@@ -107,7 +107,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     %Qui prendo la lista di tutti i nodi che sono stati trovati
                     %durante le iterazioni e li aggiungo ai kbuckets del
                     %nodo che ha avviato la funzione (ParentNode)
-                    add_nodes_to_kbuckets_cast(ParentPID, AllReceivedNodesNoDistanceNoSelf),
+                    add_nodes_to_kbuckets_cast(ParentPID, Responses),
 
                     find_value_iterative(
                         lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),
@@ -194,7 +194,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
                     %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
                     %che ho appena trovato (NewBestNodes), dato che non ne ho altri
-                    add_nodes_to_kbuckets_cast(ParentPID, NewBestNodes),
+                    add_nodes_to_kbuckets_cast(ParentPID, Responses),
 
                     %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
                     find_value_iterative(
@@ -274,7 +274,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                             %Qui prendo la lista di tutti i nodi che sono stati trovati
                             %durante le iterazioni e li aggiungo ai kbuckets del
                             %nodo che ha avviato la funzione (ParentNode)
-                            add_nodes_to_kbuckets_cast(ParentPID, AllReceivedNodesNoDistanceNoSelf),
+                            add_nodes_to_kbuckets_cast(ParentPID, Responses),
 
                             find_value_iterative(
                                 lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),

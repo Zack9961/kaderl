@@ -406,36 +406,39 @@ add_nodes_to_kbuckets(Id, NodesListToAdd, MyKBuckets) ->
                     case RightKbucket of
                         {_, _} ->
                             [{Key, CurrentNodes}] = ets:lookup(MyKBuckets, RightKbucket),
-                            NewNodes =
-                                case length(CurrentNodes) == ?K of
-                                    %se il bucket è pieno
-                                    true ->
-                                        %pingo il primo nodo del bucket, se risponde allora
-                                        %il bucket rimane invariato, altrimenti tolgo il primo
-                                        %elemento dalla lista (nodo pingato) e in coda ci
-                                        %aggiungo il nuovo nodo
-                                        {PidCurrentNode, IdCurrentNode} = hd(CurrentNodes),
-                                        case ping(PidCurrentNode) of
-                                            {pong, _} ->
-                                                tl(CurrentNodes) ++
-                                                    [{PidCurrentNode, IdCurrentNode}];
+                            %controllo se è già presente
+                            case lists:keyfind(NodeToAddId, 2, CurrentNodes) of
+                                %Non trovato
+                                false ->
+                                    NewNodes =
+                                        case length(CurrentNodes) == ?K of
+                                            %se il bucket è pieno
+                                            true ->
+                                                %pingo il primo nodo del bucket, se risponde allora
+                                                %il bucket rimane invariato, altrimenti tolgo il primo
+                                                %elemento dalla lista (nodo pingato) e in coda ci
+                                                %aggiungo il nuovo nodo
+                                                {PidCurrentNode, IdCurrentNode} = hd(CurrentNodes),
+                                                case ping(PidCurrentNode) of
+                                                    {pong, _} ->
+                                                        tl(CurrentNodes) ++
+                                                            [{PidCurrentNode, IdCurrentNode}];
+                                                    _ ->
+                                                        tl(CurrentNodes) ++
+                                                            [{NodeToAddPid, NodeToAddId}]
+                                                end;
                                             _ ->
-                                                tl(CurrentNodes) ++ [{NodeToAddPid, NodeToAddId}]
-                                        end;
-                                    _ ->
-                                        % Aggiungi il nuovo nodo alla lista (se non è già presente)
-                                        case lists:keyfind(NodeToAddId, 2, CurrentNodes) of
-                                            % Non trovato, lo aggiunge
-                                            false ->
-                                                CurrentNodes ++ [{NodeToAddPid, NodeToAddId}];
-                                            % Già presente, non fare nulla
-                                            _ ->
-                                                CurrentNodes
-                                        end
-                                end,
-
-                            % Aggiorna la tabella ETS con i nuovi nodi nel bucket
-                            ets:insert(MyKBuckets, {Key, NewNodes});
+                                                % Aggiungi il nuovo nodo alla lista
+                                                CurrentNodes ++ [{NodeToAddPid, NodeToAddId}]
+                                        end,
+                                    % Aggiorna la tabella ETS con i nuovi nodi nel bucket
+                                    ets:insert(MyKBuckets, {Key, NewNodes});
+                                % Già presente
+                                _ ->
+                                    %il nodo viene cancellato dalla lista e poi viene messo in coda
+                                    lists:delete({NodeToAddPid, NodeToAddId}, CurrentNodes),
+                                    CurrentNodes ++ [{NodeToAddPid, NodeToAddId}]
+                            end;
                         _ ->
                             {error}
                     end
