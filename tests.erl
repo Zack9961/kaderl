@@ -1,6 +1,6 @@
 -module(tests).
 -include("parameters.hrl").
--import(knode, [start_link/2]).
+-import(knode, [start_link/2, store_value/2, stop/1]).
 -import(iterative_search, [start_find_value_iterative/2, start_find_node_iterative/2]).
 -export([calcola_tempo_find_value/3, calcola_tempo_find_node/3]).
 
@@ -42,10 +42,9 @@ calcola_tempo_find_value(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
     case NodesKilled of
         [] ->
             start_nodes(NumNodes),
-            %aggiungo il valore ad un nodo a caso poi aspetto che facciano la republish 10 volte
-            gen_server:cast(
-                list_to_atom("knode_" ++ integer_to_list(rand:uniform(NumNodes))), {store, 123}
-            ),
+            %aggiungo un valore ad un nodo a caso
+            store_value(list_to_atom("knode_" ++ integer_to_list(rand:uniform(NumNodes))), 123),
+
             %aspetto che faccia almeno 5 republish
             timer:sleep((?T * 1000) * 5),
 
@@ -56,7 +55,7 @@ calcola_tempo_find_value(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
             %io:format("NodesToKill:~p~n", [NodesToKill]),
             lists:foreach(
                 fun({Num, _}) ->
-                    gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
+                    stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                 end,
                 NodesToKill
             ),
@@ -88,9 +87,7 @@ calcola_tempo_find_value(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
                             %io:format("NodesToKill: ~p~n", [NodesToKill]),
                             lists:foreach(
                                 fun({Num, _}) ->
-                                    gen_server:cast(
-                                        list_to_atom("knode_" ++ integer_to_list(Num)), stop
-                                    )
+                                    stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                                 end,
                                 NodesToKill
                             ),
@@ -103,7 +100,7 @@ calcola_tempo_find_value(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
                     NodesToKill = select_random_tuples(SurvidedNodes, NumNodesToKillPerIter),
                     lists:foreach(
                         fun({Num, _}) ->
-                            gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
+                            stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                         end,
                         NodesToKill
                     ),
@@ -182,7 +179,7 @@ calcola_tempo_find_node(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
             %io:format("NodesToKill:~p~n", [NodesToKill]),
             lists:foreach(
                 fun({Num, _}) ->
-                    gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
+                    stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                 end,
                 NodesToKill
             ),
@@ -214,9 +211,7 @@ calcola_tempo_find_node(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
                             %io:format("NodesToKill: ~p~n", [NodesToKill]),
                             lists:foreach(
                                 fun({Num, _}) ->
-                                    gen_server:cast(
-                                        list_to_atom("knode_" ++ integer_to_list(Num)), stop
-                                    )
+                                    stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                                 end,
                                 NodesToKill
                             ),
@@ -229,7 +224,7 @@ calcola_tempo_find_node(NumNodesToKillPerIter, Key, NumNodes, NodesKilled) ->
                     NodesToKill = select_random_tuples(SurvidedNodes, NumNodesToKillPerIter),
                     lists:foreach(
                         fun({Num, _}) ->
-                            gen_server:cast(list_to_atom("knode_" ++ integer_to_list(Num)), stop)
+                            stop(list_to_atom("knode_" ++ integer_to_list(Num)))
                         end,
                         NodesToKill
                     ),

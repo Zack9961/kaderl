@@ -4,28 +4,35 @@
 -include_lib("stdlib/include/ms_transform.hrl").
 -include("parameters.hrl").
 
--export([start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2]).
 -export([
-    stop/0,
+    start_link/1, start_link/2, init/1, handle_call/3, handle_cast/2, handle_info/2, terminate/2
+]).
+-export([
+    stop/1,
     ping/1,
+    store_value/2,
     aggiungi_distanza/2,
-    generate_requestId/0
+    generate_requestId/0,
+    find_node/3,
+    find_value/3,
+    add_nodes_to_kbuckets_cast/2
 ]).
 
-start_link(Name, BootstrapNode) ->
-    gen_server:start_link({local, Name}, ?MODULE, #{bootstrap => BootstrapNode}, []).
+start_link(Name) ->
+    start_link(Name, undefined).
+start_link(Name, BootstrapNodePID) ->
+    gen_server:start_link({local, Name}, ?MODULE, BootstrapNodePID, []).
 
-init(State) ->
+init(BootstrapNodePID) ->
     Id = generate_node_id(),
     %io:format("Kademlia node ~p starting, initial state: ~p, id: ~p~n", [self(), State, Id]),
     StoreTable = ets:new(kademlia_store, [set]),
     KBuckets = ets:new(buckets, [set]),
     % Inizializza la tabella KBuckets con 160 intervalli
     initialize_kbuckets(KBuckets),
-    %recupero il nodo bootstrap
-    BootstrapNodePID = maps:get(bootstrap, State, undefined),
+    %BootstrapNodePID = maps:get(bootstrap, State, undefined),
     start_periodic_republish(self()),
-    NewState = {Id, State, StoreTable, KBuckets},
+    NewState = {Id, StoreTable, KBuckets},
     case BootstrapNodePID of
         % Sono il primo nodo
         undefined ->
@@ -60,11 +67,11 @@ init(State) ->
                     {ok, NewState}
             end
     end.
-handle_call({ping, RequestId}, _From, {Id, State, StoreTable, KBuckets}) ->
+handle_call({ping, RequestId}, _From, {Id, StoreTable, KBuckets}) ->
     %io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
-    {reply, {pong, self(), RequestId}, {Id, State, StoreTable, KBuckets}};
+    {reply, {pong, self(), RequestId}, {Id, StoreTable, KBuckets}};
 handle_call(
-    {find_node, ToFindNodeId, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+    {find_node, ToFindNodeId, ParentNode, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
     %ParentNode perché se prendessi le informazioni da _From sarebbero
     %le informazioni del processo generato da spawn e non del nodo
@@ -78,9 +85,9 @@ handle_call(
     % Cerco i nodi più vicini nei miei kbuckets
     ClosestNodes = find_closest_nodes(ToFindNodeId, KBucketsList),
     % Rispondi al nodo richiedente con la lista dei nodi più vicini
-    {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}};
+    {reply, {found_nodes, ClosestNodes, RequestId}, {Id, StoreTable, KBuckets}};
 handle_call(
-    {find_value, Key, ParentNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+    {find_value, Key, ParentNode, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
     %Aggiungo il ParentNode, nei miei kbuckets
     gen_server:cast(self(), {add_nodes_to_kbuckets, [ParentNode]}),
@@ -88,15 +95,15 @@ handle_call(
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
-            {reply, {found_value, Value, RequestId}, {Id, State, StoreTable, KBuckets}};
+            {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
         [] ->
             % Il nodo non ha il valore, restituisce i nodi più vicini
             KBucketsList = ets:tab2list(KBuckets),
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
-            {reply, {found_nodes, ClosestNodes, RequestId}, {Id, State, StoreTable, KBuckets}}
+            {reply, {found_nodes, ClosestNodes, RequestId}, {Id, StoreTable, KBuckets}}
     end;
 handle_call(
-    {join_request, IdNewNode, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+    {join_request, IdNewNode, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
     {PidNewNode, _} = _From,
     %io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PID]),
@@ -107,9 +114,9 @@ handle_call(
     % invia la lista di nodi più vicini a lui
     KBucketsList = ets:tab2list(KBuckets),
     ClosestNodes = find_closest_nodes(IdNewNode, KBucketsList),
-    {reply, {k_buckets, ClosestNodes, Id, RequestId}, {Id, State, StoreTable, KBuckets}};
+    {reply, {k_buckets, ClosestNodes, Id, RequestId}, {Id, StoreTable, KBuckets}};
 handle_call(
-    {start_find_node_iterative, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+    {start_find_node_iterative, Key, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
@@ -125,9 +132,9 @@ handle_call(
     IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key, ParentNode),
 
     {reply, {founded_nodes_from_iteration, IterativeNodesFound, RequestId},
-        {Id, State, StoreTable, KBuckets}};
+        {Id, StoreTable, KBuckets}};
 handle_call(
-    {start_find_value_iterative, Key, RequestId}, _From, {Id, State, StoreTable, KBuckets}
+    {start_find_value_iterative, Key, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
     %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
     KBucketsList = ets:tab2list(KBuckets),
@@ -141,34 +148,34 @@ handle_call(
 
     case IterativeFound of
         {found_value, Value} ->
-            {reply, {found_value, Value, RequestId}, {Id, State, StoreTable, KBuckets}};
+            {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
         _ ->
-            {reply, {value_not_found, IterativeFound, RequestId}, {Id, State, StoreTable, KBuckets}}
+            {reply, {value_not_found, IterativeFound, RequestId}, {Id, StoreTable, KBuckets}}
     end;
 handle_call(_Request, _From, State) ->
     %io:format("Received unknown request: ~p~n", [_Request]),
     {reply, {error, unknown_request}, State}.
 
-handle_cast({store, Value}, {Id, State, StoreTable, KBuckets}) ->
+handle_cast({store, Value}, {Id, StoreTable, KBuckets}) ->
     %Calcola la key
     HashValue = crypto:hash(sha, integer_to_binary(Value)),
     Key = binary_to_integer_representation(HashValue),
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    {noreply, {Id, State, StoreTable, KBuckets}};
-handle_cast({store, Key, Value}, {Id, State, StoreTable, KBuckets}) ->
+    {noreply, {Id, StoreTable, KBuckets}};
+handle_cast({store, Key, Value}, {Id, StoreTable, KBuckets}) ->
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),
-    {noreply, {Id, State, StoreTable, KBuckets}};
-handle_cast(republish_data_refresh_kbuckets, {Id, State, StoreTable, KBuckets}) ->
+    {noreply, {Id, StoreTable, KBuckets}};
+handle_cast(republish_data_refresh_kbuckets, {Id, StoreTable, KBuckets}) ->
     %io:format("Received republish message, sono il nodo con il pid:~p~n", [self()]),
     republish_data(StoreTable, KBuckets),
     %refresh_kbuckets(Id, KBuckets),
     start_periodic_republish(self()),
-    {noreply, {Id, State, StoreTable, KBuckets}};
-handle_cast({add_nodes_to_kbuckets, NodesToAdd}, {Id, State, StoreTable, KBuckets}) ->
+    {noreply, {Id, StoreTable, KBuckets}};
+handle_cast({add_nodes_to_kbuckets, NodesToAdd}, {Id, StoreTable, KBuckets}) ->
     add_nodes_to_kbuckets(Id, NodesToAdd, KBuckets),
-    {noreply, {Id, State, StoreTable, KBuckets}};
+    {noreply, {Id, StoreTable, KBuckets}};
 handle_cast(stop, State) ->
     {stop, normal, State};
 handle_cast(_Msg, State) ->
@@ -183,8 +190,11 @@ terminate(_Reason, _State) ->
     %io:format("Kademlia node ~p terminating ~p~n", [self(), _Reason]),
     ok.
 
-stop() ->
-    gen_server:cast(?MODULE, stop).
+stop(PID) ->
+    gen_server:cast(PID, stop).
+
+store_value(PID, Value) ->
+    gen_server:cast(PID, {store, Value}).
 
 store(PID, Key, Value) ->
     gen_server:cast(PID, {store, Key, Value}).
@@ -202,9 +212,57 @@ ping(PID) ->
         {'EXIT', Reason} ->
             {error, Reason};
         _ ->
-            io:format("Risposta non gestita"),
+            %io:format("Risposta non gestita"),
             {error}
     end.
+
+find_node(PID, Key, ParentNode) ->
+    {ParentPID, _} = ParentNode,
+    RequestId = generate_requestId(),
+    Response = catch gen_server:call(PID, {find_node, Key, ParentNode, RequestId}, 2000),
+    %Invio la risposta al processo principale
+    %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
+    %allora manda invalid_request id, negli altri casi manda una response
+    case Response of
+        {found_nodes, _, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    ParentPID ! {ok, Response};
+                _ ->
+                    ParentPID ! {invalid_requestid, Response}
+            end;
+        _ ->
+            ParentPID ! {ok, Response}
+    end.
+
+find_value(PIDNodo, Key, ParentNode) ->
+    {ParentPID, _} = ParentNode,
+    RequestId = generate_requestId(),
+    Response =
+        (catch gen_server:call(
+            PIDNodo, {find_value, Key, ParentNode, RequestId}, 2000
+        )),
+    case Response of
+        {found_value, _, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    ParentPID ! {found_value, Response};
+                _ ->
+                    ParentPID ! {invalid_requestid, Response}
+            end;
+        {found_nodes, _, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    ParentPID ! {found_nodes, Response};
+                _ ->
+                    ParentPID ! {invalid_requestid, Response}
+            end;
+        _ ->
+            ParentPID ! {ok, Response}
+    end.
+
+add_nodes_to_kbuckets_cast(PID, NodesToAdd) ->
+    gen_server:cast(PID, {add_nodes_to_kbuckets, NodesToAdd}).
 
 generate_node_id() ->
     % 1. Genera un intero casuale grande (64 bit)

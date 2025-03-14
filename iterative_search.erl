@@ -1,6 +1,12 @@
 -module(iterative_search).
 -include("parameters.hrl").
--import(knode, [aggiungi_distanza/2, generate_requestId/0]).
+-import(knode, [
+    aggiungi_distanza/2,
+    generate_requestId/0,
+    find_node/3,
+    find_value/3,
+    add_nodes_to_kbuckets_cast/2
+]).
 -export([
     find_node_iterative/3,
     find_value_iterative/3,
@@ -15,7 +21,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
     case BestNodes == [] of
         true ->
-            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
+            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
 
             %Qui aggiungo anche i nodi che ho interrogato
             ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
@@ -41,7 +47,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
             %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
             %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
             %che ho appena trovato (NewBestNodes), dato che non ne ho altri
-            gen_server:cast(ParentPID, {add_nodes_to_kbuckets, NewBestNodes}),
+            add_nodes_to_kbuckets_cast(ParentPID, NewBestNodes),
 
             %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
             find_node_iterative(
@@ -54,7 +60,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
         %i processi alla prossima iterazione
         _ ->
             % Gestisco le risposte, ricevo una lista di liste di nodi ricevuti
-            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
+            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
 
             %Qui aggiungo anche i nodi che ho interrogato
             ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
@@ -101,10 +107,7 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     %Qui prendo la lista di tutti i nodi che sono stati trovati
                     %durante le iterazioni e li aggiungo ai kbuckets del
                     %nodo che ha avviato la funzione (ParentNode)
-                    gen_server:cast(
-                        ParentPID,
-                        {add_nodes_to_kbuckets, AllReceivedNodesNoDistanceNoSelf}
-                    ),
+                    add_nodes_to_kbuckets_cast(ParentPID, AllReceivedNodesNoDistanceNoSelf),
 
                     find_value_iterative(
                         lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),
@@ -135,34 +138,13 @@ receive_responses_find_node(N, Responses) ->
         receive_responses_find_node(N - 1, [Responses])
     end.
 
-find_node_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID) ->
+find_node_spawn(AlphaClosestNodes, Key, ParentNode) ->
     %Creo la lista di soli pid dalla lista di tuple
     AlphaClosestNodesPID = lists:map(fun({PIDNodo, _}) -> PIDNodo end, AlphaClosestNodes),
-
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            spawn(fun() ->
-                RequestId = generate_requestId(),
-                Response =
-                    (catch gen_server:call(
-                        PIDNodo, {find_node, Key, ParentNode, RequestId}, 2000
-                    )),
-                %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
-                %allora manda invalid_request id, negli altri casi manda una response
-                case Response of
-                    {found_nodes, _, ReceivedRequestId} ->
-                        case RequestId == ReceivedRequestId of
-                            true ->
-                                ParentPID ! {ok, Response};
-                            _ ->
-                                ParentPID ! {invalid_requestid, Response}
-                        end;
-                    _ ->
-                        ParentPID ! {ok, Response}
-                end
-            % Invio la risposta al processo principale
-            end)
+            spawn(fun() -> find_node(PIDNodo, Key, ParentNode) end)
         end,
         AlphaClosestNodesPID
     ),
@@ -175,7 +157,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     case BestNodes == [] of
         true ->
             %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
-            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
+            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
 
             %se ho trovato il valore ritorno direttamente il valore altrimenti
             %come find_node
@@ -212,7 +194,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
                     %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
                     %che ho appena trovato (NewBestNodes), dato che non ne ho altri
-                    gen_server:cast(ParentPID, {add_nodes_to_kbuckets, NewBestNodes}),
+                    add_nodes_to_kbuckets_cast(ParentPID, NewBestNodes),
 
                     %Ora interrogo alpha nodi che prendo dalla lista di nodi che ho ricavato
                     find_value_iterative(
@@ -226,7 +208,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
         %i processi alla prossima iterazione
         _ ->
             %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
-            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID),
+            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
 
             %qui faccio l'if, se trovo il nodo termino altrimenti come find_node
             case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
@@ -292,10 +274,7 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                             %Qui prendo la lista di tutti i nodi che sono stati trovati
                             %durante le iterazioni e li aggiungo ai kbuckets del
                             %nodo che ha avviato la funzione (ParentNode)
-                            gen_server:cast(
-                                ParentPID,
-                                {add_nodes_to_kbuckets, AllReceivedNodesNoDistanceNoSelf}
-                            ),
+                            add_nodes_to_kbuckets_cast(ParentPID, AllReceivedNodesNoDistanceNoSelf),
 
                             find_value_iterative(
                                 lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),
@@ -336,41 +315,14 @@ receive_responses_find_value(N, Responses) ->
         receive_responses_find_value(N - 1, [Responses])
     end.
 
-find_value_spawn(AlphaClosestNodes, Key, ParentNode, ParentPID) ->
+find_value_spawn(AlphaClosestNodes, Key, ParentNode) ->
     %Creo la lista di soli pid dalla lista di tuple
     AlphaClosestNodesPID = lists:map(fun({PIDNodo, _}) -> PIDNodo end, AlphaClosestNodes),
 
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            spawn(fun() ->
-                RequestId = generate_requestId(),
-                Response =
-                    (catch gen_server:call(
-                        PIDNodo, {find_value, Key, ParentNode, RequestId}, 2000
-                    )),
-                %Controllo il requestId, in caso trova nodi ma il request id è sbagliato
-                %allora manda invalid_request id, negli altri casi manda la risposta al
-                % nodo che ha avviato la ricerca
-                case Response of
-                    {found_value, _, ReceivedRequestId} ->
-                        case RequestId == ReceivedRequestId of
-                            true ->
-                                ParentPID ! {found_value, Response};
-                            _ ->
-                                ParentPID ! {invalid_requestid, Response}
-                        end;
-                    {found_nodes, _, ReceivedRequestId} ->
-                        case RequestId == ReceivedRequestId of
-                            true ->
-                                ParentPID ! {found_nodes, Response};
-                            _ ->
-                                ParentPID ! {invalid_requestid, Response}
-                        end;
-                    _ ->
-                        ParentPID ! {ok, Response}
-                end
-            end)
+            spawn(fun() -> find_value(PIDNodo, Key, ParentNode) end)
         end,
         AlphaClosestNodesPID
     ),
