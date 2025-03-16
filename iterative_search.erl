@@ -16,26 +16,20 @@
 
 find_node_iterative(AlphaClosestNodes, Key, ParentNode) ->
     find_node_iterative(AlphaClosestNodes, Key, ParentNode, []).
-
 find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
+    Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
+    %Qui aggiungo anche i nodi che ho interrogato e tolgo i duplicati
+    NoDuplicatedList = ordsets:to_list(ordsets:from_list(Responses ++ AlphaClosestNodes)),
+    NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
+    %Ordina i nodi per distanza crescente.
+    NodiOrdinati = lists:sort(
+        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
+    ),
+    % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+    NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
     case BestNodes == [] of
         true ->
-            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
-
-            %Qui aggiungo anche i nodi che ho interrogato
-            ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
-
-            NoDuplicatedList = ordsets:to_list(ordsets:from_list(ReceivedNodesAndTriedNodes)),
-
-            NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
-            %Ordina i nodi per distanza crescente.
-            NodiOrdinati = lists:sort(
-                fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
-            ),
-
-            % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
-            NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
             NewBestNodes = lists:map(
                 fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
             ),
@@ -43,7 +37,6 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
             NewBestNodesNoSelf = lists:filter(
                 fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes
             ),
-
             %Qui aggiorno i kbuckets del nodo che ha avviato la funzione (Parent)
             %dato che sono nel caso iniziale, passo come argomento solo i nodi migliori
             %che ho appena trovato (NewBestNodes), dato che non ne ho altri
@@ -59,23 +52,6 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
         %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
         %i processi alla prossima iterazione
         _ ->
-            % Gestisco le risposte, ricevo una lista di liste di nodi ricevuti
-            Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
-
-            %Qui aggiungo anche i nodi che ho interrogato
-            ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
-
-            NoDuplicatedList = ordsets:to_list(ordsets:from_list(ReceivedNodesAndTriedNodes)),
-
-            NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
-            %Ordina i nodi per distanza crescente.
-            NodiOrdinati = lists:sort(
-                fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
-            ),
-
-            % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
-            NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
-
             case lists:all(fun(X) -> lists:member(X, BestNodes) end, NewBestNodesWithDistance) of
                 true ->
                     %non ho trovato i nodi più vicini,
@@ -84,10 +60,8 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                 _ ->
                     %aggiungo i nuovi nodi trovati alla lista di tutti i nodi
                     %trovati, tolgo i doppioni e riordino la lista
-                    AllReceivedNodesWithDuplicates =
-                        NewBestNodesWithDistance ++ BestNodes,
                     AllReceivedNodesNosort = ordsets:to_list(
-                        ordsets:from_list(AllReceivedNodesWithDuplicates)
+                        ordsets:from_list(NewBestNodesWithDistance ++ BestNodes)
                     ),
                     AllReceivedNodes = lists:sort(
                         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end,
@@ -117,6 +91,44 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                     )
             end
     end.
+
+% find_node_iterative(AlphaClosestNodes, Key, ParentNode) ->
+%     find_node_iterative(AlphaClosestNodes, Key, ParentNode, []).
+
+% find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
+%     ParentPID = self(),
+%     Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
+%     AllNodes = ordsets:to_list(ordsets:from_list(Responses ++ AlphaClosestNodes)),
+%     NodesWithDistance = aggiungi_distanza(AllNodes, Key),
+%     SortedNodes = lists:usort(
+%         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodesWithDistance
+%     ),
+%     NewBestNodes = lists:take(?K, SortedNodes),
+%     case {BestNodes, lists:all(fun(X) -> lists:member(X, NewBestNodes) end, NewBestNodes)} of
+%         {[], _} ->
+%             NewBestNodesNoSelf = lists:filter(fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes),
+%             add_nodes_to_kbuckets_cast(ParentPID, Responses),
+%             find_node_iterative(
+%                 lists:sublist(NewBestNodesNoSelf, ?A), Key, ParentNode, NewBestNodes
+%             );
+%         {_, true} ->
+%             lists:sublist(BestNodes, ?K);
+%         {_, false} ->
+%             AllReceivedNodes = ordsets:to_list(ordsets:from_list(NewBestNodes ++ BestNodes)),
+%             AllReceivedNodesNoDistance = lists:map(
+%                 fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, AllReceivedNodes
+%             ),
+%             AllReceivedNodesNoDistanceNoSelf = lists:filter(
+%                 fun({Pid, _}) -> Pid /= ParentPID end, AllReceivedNodesNoDistance
+%             ),
+%             add_nodes_to_kbuckets_cast(ParentPID, Responses),
+%             find_value_iterative(
+%                 lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),
+%                 Key,
+%                 ParentNode,
+%                 AllReceivedNodes
+%             )
+%     end.
 
 receive_responses_find_node(0, Responses) ->
     lists:flatten(Responses);
@@ -340,7 +352,14 @@ start_find_node_iterative(NodePID, Key) ->
         {founded_nodes_from_iteration, FoundedNodes, ReceivedRequestId} ->
             case RequestId == ReceivedRequestId of
                 true ->
-                    {ok, FoundedNodes, NodePID};
+                    {founded_nodes_from_iteration, FoundedNodes, NodePID};
+                _ ->
+                    {error, invalid_requestid, NodePID}
+            end;
+        {empty_kbuckets, FoundedNodes, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    {empty_kbuckets, FoundedNodes, NodePID};
                 _ ->
                     {error, invalid_requestid, NodePID}
             end;
@@ -369,6 +388,13 @@ start_find_value_iterative(NodePID, Key) ->
             case RequestId == ReceivedRequestId of
                 true ->
                     {value_not_found, NodeList, NodePID};
+                _ ->
+                    {error, invalid_requestid, NodePID}
+            end;
+        {empty_kbuckets, FoundedNodes, ReceivedRequestId} ->
+            case RequestId == ReceivedRequestId of
+                true ->
+                    {empty_kbuckets, FoundedNodes, NodePID};
                 _ ->
                     {error, invalid_requestid, NodePID}
             end;

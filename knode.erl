@@ -101,16 +101,21 @@ handle_call(
     ClosestNodes = find_closest_nodes(Key, KBucketsList),
     %Scelgo alpha nodi da interrogare in parallelo
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
+    %controllo alpha
+    case AlphaClosestNodes of
+        [] ->
+            {reply, {empty_kbuckets, [], RequestId}, {Id, StoreTable, KBuckets}};
+        _ ->
+            %ParentNode utile per dare l'informazione del nodo padre ai nodi riceventi
+            %in modo che possono aggiungere questo nodo ai propri kbuckets
+            ParentNode = {self(), Id},
 
-    %ParentNode utile per dare l'informazione del nodo padre ai nodi riceventi
-    %in modo che possono aggiungere questo nodo ai propri kbuckets
-    ParentNode = {self(), Id},
+            %Quindi faccio partire la funzione find_node_iterative
+            IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key, ParentNode),
 
-    %Quindi faccio partire la funzione find_node_iterative
-    IterativeNodesFound = find_node_iterative(AlphaClosestNodes, Key, ParentNode),
-
-    {reply, {founded_nodes_from_iteration, IterativeNodesFound, RequestId},
-        {Id, StoreTable, KBuckets}};
+            {reply, {founded_nodes_from_iteration, IterativeNodesFound, RequestId},
+                {Id, StoreTable, KBuckets}}
+    end;
 handle_call(
     {start_find_value_iterative, Key, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
@@ -119,16 +124,23 @@ handle_call(
     ClosestNodes = find_closest_nodes(Key, KBucketsList),
     %Scelgo alpha nodi da interrogare in parallelo
     AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
-    %Quindi faccio partire la funzione find_value_iterative
-    ParentNode = {self(), Id},
 
-    IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
-
-    case IterativeFound of
-        {found_value, Value} ->
-            {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
+    case AlphaClosestNodes of
+        [] ->
+            {reply, {empty_kbuckets, [], RequestId}, {Id, StoreTable, KBuckets}};
         _ ->
-            {reply, {value_not_found, IterativeFound, RequestId}, {Id, StoreTable, KBuckets}}
+            %Quindi faccio partire la funzione find_value_iterative
+            ParentNode = {self(), Id},
+
+            IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
+
+            case IterativeFound of
+                {found_value, Value} ->
+                    {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
+                _ ->
+                    {reply, {value_not_found, IterativeFound, RequestId},
+                        {Id, StoreTable, KBuckets}}
+            end
     end;
 handle_call(_Request, _From, State) ->
     %io:format("Received unknown request: ~p~n", [_Request]),

@@ -131,7 +131,7 @@ start_routine_find_value_iterative(ListaNodi, Key) ->
     Tempi = [Tempo || {_, _, Tempo, _} <- NodeListWithTimeResult],
     %io:format("Tempi: ~p, su ~p nodi totali~n", [Tempi, length(ListaNodi)]),
     Media = round(lists:sum(Tempi) / length(Tempi)),
-    io:format("Media dei tempi di lookup di tutti i nodi: ~p, su ~p nodi totali~n", [
+    io:format("Media dei tempi di risposta di tutti i nodi: ~p, su ~p nodi totali~n", [
         Media, length(ListaNodi)
     ]),
 
@@ -255,9 +255,37 @@ start_routine_find_node_iterative(ListaNodi, Key) ->
     Tempi = [Tempo || {_, _, Tempo, _} <- NodeListWithTimeResult],
     %io:format("Tempi: ~p, su ~p nodi totali~n", [Tempi, length(ListaNodi)]),
     Media = round(lists:sum(Tempi) / length(Tempi)),
-    io:format("Media dei tempi di lookup di tutti i nodi: ~p, su ~p nodi totali~n", [
+    io:format("Media dei tempi di risposta di tutti i nodi: ~p, su ~p nodi totali~n", [
         Media, length(ListaNodi)
-    ]).
+    ]),
+    ListaNodiFound = lists:filter(
+        fun
+            ({_, _, _, {founded_nodes_from_iteration, _, _}}) -> true;
+            ({_, _, _, _}) -> false
+        end,
+        NodeListWithTimeResult
+    ),
+
+    case ListaNodiFound of
+        [] ->
+            io:format("Nessun nodo ha trovato dei nodi su ~p nodi totali ~n", [length(ListaNodi)]);
+        _ ->
+            Percentuale =
+                round((length(ListaNodiFound) / length(NodeListWithTimeResult)) * 100 * 10) / 10,
+            ListaTempiNodiFound = lists:map(fun({_, _, Tempo, _}) -> Tempo end, ListaNodiFound),
+            MediaFound = round(lists:sum(ListaTempiNodiFound) / length(ListaTempiNodiFound)),
+
+            io:format("Percentuale nodi che hanno trovato dei nodi: ~p, su ~p nodi totali ~n", [
+                Percentuale, length(ListaNodi)
+            ]),
+
+            io:format(
+                "Media dei tempi di lookup dei nodi che hanno trovato dei nodi: ~p (~p su ~p nodi totali)~n~n",
+                [
+                    MediaFound, length(ListaNodiFound), length(ListaNodi)
+                ]
+            )
+    end.
 
 select_random_tuples(List, Num) ->
     select_random_tuples(List, Num, []).
