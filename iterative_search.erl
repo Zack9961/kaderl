@@ -166,11 +166,12 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode) ->
     find_value_iterative(AlphaClosestNodes, Key, ParentNode, []).
 find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
+
+    %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
+    Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
+
     case BestNodes == [] of
         true ->
-            %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
-            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
-
             %se ho trovato il valore ritorno direttamente il valore altrimenti
             %come find_node
             case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
@@ -219,9 +220,6 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
         %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
         %i processi alla prossima iterazione
         _ ->
-            %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
-            Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
-
             %qui faccio l'if, se trovo il nodo termino altrimenti come find_node
             case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
                 true ->
