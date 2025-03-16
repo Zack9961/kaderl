@@ -166,36 +166,30 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode) ->
     find_value_iterative(AlphaClosestNodes, Key, ParentNode, []).
 find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
     ParentPID = self(),
-
     %faccio la spawn dei nodi e ritorno la lista dei nodi ricevuti o una risposta find_value
     Responses = find_value_spawn(AlphaClosestNodes, Key, ParentNode),
-
-    case BestNodes == [] of
+    %se ho trovato il valore ritorno direttamente il valore altrimenti
+    %come find_node
+    case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
         true ->
-            %se ho trovato il valore ritorno direttamente il valore altrimenti
-            %come find_node
-            case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
-                true ->
-                    Value = hd(
-                        lists:filter(fun({Value, _}) -> Value == found_value end, Responses)
-                    ),
-                    Value;
-                _ ->
-                    %Aggiungo anche i nodi che ho interrogato
-                    ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
-
-                    NoDuplicatedList = ordsets:to_list(
-                        ordsets:from_list(ReceivedNodesAndTriedNodes)
-                    ),
-
-                    NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
-                    %Ordina i nodi per distanza crescente.
-                    NodiOrdinati = lists:sort(
-                        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
-                    ),
-
-                    % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
-                    NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
+            Value = hd(
+                lists:filter(fun({Value, _}) -> Value == found_value end, Responses)
+            ),
+            Value;
+        _ ->
+            %Qui aggiungo anche i nodi che ho interrogato e tolgo i duplicati
+            NoDuplicatedList = ordsets:to_list(
+                ordsets:from_list(Responses ++ AlphaClosestNodes)
+            ),
+            NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
+            %Ordina i nodi per distanza crescente.
+            NodiOrdinati = lists:sort(
+                fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
+            ),
+            % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
+            NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
+            case BestNodes of
+                [] ->
                     NewBestNodes = lists:map(
                         fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, NewBestNodesWithDistance
                     ),
@@ -215,35 +209,10 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                         Key,
                         ParentNode,
                         NewBestNodesWithDistance
-                    )
-            end;
-        %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
-        %i processi alla prossima iterazione
-        _ ->
-            %qui faccio l'if, se trovo il nodo termino altrimenti come find_node
-            case lists:any(fun({Value, _}) -> Value == found_value end, Responses) of
-                true ->
-                    Value = hd(
-                        lists:filter(fun({Value, _}) -> Value == found_value end, Responses)
-                    ),
-                    Value;
+                    );
+                %in questo caso ho dei best nodes da confrontare con quelli che tireranno fuori
+                %i processi alla prossima iterazione
                 _ ->
-                    %Qui aggiungo anche i nodi che ho interrogato
-                    ReceivedNodesAndTriedNodes = Responses ++ AlphaClosestNodes,
-
-                    NoDuplicatedList = ordsets:to_list(
-                        ordsets:from_list(ReceivedNodesAndTriedNodes)
-                    ),
-
-                    NodiConDistanza = aggiungi_distanza(NoDuplicatedList, Key),
-                    %Ordina i nodi per distanza crescente.
-                    NodiOrdinati = lists:sort(
-                        fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodiConDistanza
-                    ),
-
-                    % Restituisce i primi K nodi (o tutti se ce ne sono meno di K) senza la distanza.
-                    NewBestNodesWithDistance = lists:sublist(NodiOrdinati, ?K),
-
                     %controllo se i nodi che ho trovato sono un sottoinsieme dei nodi trovati in precedenze
                     %se lo sono allora termino l'esecuzione e restituisco i migliori nodi trovati fino ad ora
                     %altrimenti aggiungo i nodi appena trovati alla lista di tutti i nodi trovati,
@@ -261,24 +230,20 @@ find_value_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
                         _ ->
                             %aggiungo i nuovi nodi trovati alla lista di tutti i nodi
                             %trovati, tolgo i doppioni e riordino la lista
-                            AllReceivedNodesWithDuplicates =
-                                NewBestNodesWithDistance ++ BestNodes,
                             AllReceivedNodesNosort = ordsets:to_list(
-                                ordsets:from_list(AllReceivedNodesWithDuplicates)
+                                ordsets:from_list(NewBestNodesWithDistance ++ BestNodes)
                             ),
                             AllReceivedNodes = lists:sort(
                                 fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end,
                                 AllReceivedNodesNosort
                             ),
                             AllReceivedNodesNoDistance = lists:map(
-                                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end,
-                                AllReceivedNodes
+                                fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, AllReceivedNodes
                             ),
                             %In caso tolgo il pid che sta facendo l'iterazione, perché non
                             %ha senso che mandi un messaggio a se stesso
                             AllReceivedNodesNoDistanceNoSelf = lists:filter(
-                                fun({Pid, _}) -> Pid /= ParentPID end,
-                                AllReceivedNodesNoDistance
+                                fun({Pid, _}) -> Pid /= ParentPID end, AllReceivedNodesNoDistance
                             ),
 
                             %Qui prendo la lista di tutti i nodi che sono stati trovati

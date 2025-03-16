@@ -119,27 +119,34 @@ handle_call(
 handle_call(
     {start_find_value_iterative, Key, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
-    %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
-    KBucketsList = ets:tab2list(KBuckets),
-    ClosestNodes = find_closest_nodes(Key, KBucketsList),
-    %Scelgo alpha nodi da interrogare in parallelo
-    AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
-
-    case AlphaClosestNodes of
+    case ets:lookup(StoreTable, Key) of
+        % Il nodo ha il valore, lo restituisce
+        [{Key, Value}] ->
+            {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
+        % Il nodo non ha il valore, inizia la ricerca iterativa
         [] ->
-            {reply, {empty_kbuckets, [], RequestId}, {Id, StoreTable, KBuckets}};
-        _ ->
-            %Quindi faccio partire la funzione find_value_iterative
-            ParentNode = {self(), Id},
+            %Prendo dai miei kbuckets la lista dei k nodi più vicini alla chiave
+            KBucketsList = ets:tab2list(KBuckets),
+            ClosestNodes = find_closest_nodes(Key, KBucketsList),
+            %Scelgo alpha nodi da interrogare in parallelo
+            AlphaClosestNodes = lists:sublist(ClosestNodes, ?A),
 
-            IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
-
-            case IterativeFound of
-                {found_value, Value} ->
-                    {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
+            case AlphaClosestNodes of
+                [] ->
+                    {reply, {empty_kbuckets, [], RequestId}, {Id, StoreTable, KBuckets}};
                 _ ->
-                    {reply, {value_not_found, IterativeFound, RequestId},
-                        {Id, StoreTable, KBuckets}}
+                    %Quindi faccio partire la funzione find_value_iterative
+                    ParentNode = {self(), Id},
+
+                    IterativeFound = find_value_iterative(AlphaClosestNodes, Key, ParentNode),
+
+                    case IterativeFound of
+                        {found_value, Value} ->
+                            {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
+                        _ ->
+                            {reply, {value_not_found, IterativeFound, RequestId},
+                                {Id, StoreTable, KBuckets}}
+                    end
             end
     end;
 handle_call(_Request, _From, State) ->
