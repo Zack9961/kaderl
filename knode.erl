@@ -13,8 +13,8 @@
     store_value/2,
     aggiungi_distanza/2,
     generate_requestId/0,
-    find_node/3,
-    find_value/3,
+    find_node_for_spawn/3,
+    find_value_for_spawn/3,
     add_nodes_to_kbuckets_cast/2
 ]).
 
@@ -25,50 +25,28 @@ start_link(Name, BootstrapNodePID) ->
 
 init(BootstrapNodePID) ->
     Id = generate_node_id(),
-    %io:format("Kademlia node ~p starting, initial state: ~p, id: ~p~n", [self(), State, Id]),
+    % io:format("Nodo kademlia con PID ~p, ID ~p e argomento ~p in avvio...~n", [
+    %     self(), Id, BootstrapNodePID
+    % ]),
     StoreTable = ets:new(kademlia_store, [set]),
     KBuckets = ets:new(buckets, [set]),
-    % Inizializza la tabella KBuckets con 160 intervalli
+    % Inizializza la tabella KBuckets
     initialize_kbuckets(KBuckets),
-    %BootstrapNodePID = maps:get(bootstrap, State, undefined),
     start_periodic_republish(self()),
     NewState = {Id, StoreTable, KBuckets},
-    case BootstrapNodePID of
-        % Sono il primo nodo
-        undefined ->
-            %io:format("Nodo ~p diventato bootstrap~n", [Id]),
-            {ok, NewState};
-        % Connetto al nodo bootstrap
-        _ ->
+    case is_pid(BootstrapNodePID) of
+        % Mi connetto al nodo bootstrap
+        true ->
             %io:format("Nodo ~p prova a connettersi a bootstrap ~p~n", [Id, BootstrapNodePID]),
-            RequestId = generate_requestId(),
-            case
-                (catch gen_server:call(
-                    BootstrapNodePID, {join_request, Id, RequestId}, 2000
-                ))
-            of
-                {k_buckets, ClosestNodesReceived, BootstrapID, RequestIdReceived} ->
-                    % Nodo bootstrap raggiungibile, procedo normalmente
-                    case RequestId == RequestIdReceived of
-                        true ->
-                            BootstrapNode = {BootstrapNodePID, BootstrapID},
-
-                            %aggiungo il nodo bootstrap  e i suoi nodi
-                            %mandati in risposta ai miei KBuckets
-                            add_nodes_to_kbuckets(
-                                Id, ClosestNodesReceived ++ [BootstrapNode], KBuckets
-                            ),
-                            {ok, NewState};
-                        _ ->
-                            {ok, NewState}
-                    end;
-                _ ->
-                    % Nodo bootstrap non raggiungibile, divento bootstrap
-                    {ok, NewState}
-            end
+            join_request(BootstrapNodePID, Id, NewState);
+        % Sono il nodo bootstrap
+        _ ->
+            %io:format("Nodo ~p diventato bootstrap~n", [Id]),
+            {ok, NewState}
     end.
 handle_call({ping, RequestId}, _From, {Id, StoreTable, KBuckets}) ->
-    %io:format("Node ~p (~p) received ping from ~p~n", [self(), Id, PID]),
+    % {PIDFrom, _} = _From,
+    % io:format("Nodo con PID ~p e ID ~p ha ricevuto ping da ~p~n", [self(), Id, PIDFrom]),
     {reply, {pong, self(), RequestId}, {Id, StoreTable, KBuckets}};
 handle_call(
     {find_node, ToFindNodeId, ParentNode, RequestId}, _From, {Id, StoreTable, KBuckets}
@@ -78,26 +56,26 @@ handle_call(
     %che invia la richiesta direttamente
     %provo ad aggiungere il nodo che mi ha inviato la richiesta ai miei kbuckets
     %mandandomi un messaggio cast
-    gen_server:cast(self(), {add_nodes_to_kbuckets, [ParentNode]}),
+    add_nodes_to_kbuckets_cast(self(), [ParentNode]),
 
-    % Recupera i k-bucket dalla tabella ETS
+    % Recupero i k-buckets dalla tabella ETS
     KBucketsList = ets:tab2list(KBuckets),
     % Cerco i nodi più vicini nei miei kbuckets
     ClosestNodes = find_closest_nodes(ToFindNodeId, KBucketsList),
-    % Rispondi al nodo richiedente con la lista dei nodi più vicini
+    % Rispondo al nodo richiedente con la lista dei nodi più vicini
     {reply, {found_nodes, ClosestNodes, RequestId}, {Id, StoreTable, KBuckets}};
 handle_call(
     {find_value, Key, ParentNode, RequestId}, _From, {Id, StoreTable, KBuckets}
 ) ->
-    %Aggiungo il ParentNode, nei miei kbuckets
-    gen_server:cast(self(), {add_nodes_to_kbuckets, [ParentNode]}),
+    %Aggiungo il ParentNode nei miei kbuckets
+    add_nodes_to_kbuckets_cast(self(), [ParentNode]),
 
     case ets:lookup(StoreTable, Key) of
         [{Key, Value}] ->
             % Il nodo ha il valore, lo restituisce
             {reply, {found_value, Value, RequestId}, {Id, StoreTable, KBuckets}};
         [] ->
-            % Il nodo non ha il valore, restituisce i nodi più vicini
+            % Il nodo non ha il valore, restituisce i nodi più vicini come find_node
             KBucketsList = ets:tab2list(KBuckets),
             ClosestNodes = find_closest_nodes(Key, KBucketsList),
             {reply, {found_nodes, ClosestNodes, RequestId}, {Id, StoreTable, KBuckets}}
@@ -109,7 +87,7 @@ handle_call(
     %io:format("Sono il Nodo ~p, ho ricevuto join_request da ~p~n", [Id, PID]),
 
     %mando un messaggio a me stesso per aggiungere in modo asincrono il nodo ai kbuckets
-    gen_server:cast(self(), {add_nodes_to_kbuckets, [{PidNewNode, IdNewNode}]}),
+    add_nodes_to_kbuckets_cast(self(), [{PidNewNode, IdNewNode}]),
 
     % invia la lista di nodi più vicini a lui
     KBucketsList = ets:tab2list(KBuckets),
@@ -212,11 +190,10 @@ ping(PID) ->
         {'EXIT', Reason} ->
             {error, Reason};
         _ ->
-            %io:format("Risposta non gestita"),
             {error}
     end.
 
-find_node(PID, Key, ParentNode) ->
+find_node_for_spawn(PID, Key, ParentNode) ->
     {ParentPID, _} = ParentNode,
     RequestId = generate_requestId(),
     Response = catch gen_server:call(PID, {find_node, Key, ParentNode, RequestId}, 2000),
@@ -231,11 +208,13 @@ find_node(PID, Key, ParentNode) ->
                 _ ->
                     ParentPID ! {invalid_requestid, Response}
             end;
+        {'EXIT', Reason} ->
+            ParentPID ! {error, Reason};
         _ ->
-            ParentPID ! {ok, Response}
+            ParentPID ! {error, Response}
     end.
 
-find_value(PIDNodo, Key, ParentNode) ->
+find_value_for_spawn(PIDNodo, Key, ParentNode) ->
     {ParentPID, _} = ParentNode,
     RequestId = generate_requestId(),
     Response =
@@ -257,20 +236,44 @@ find_value(PIDNodo, Key, ParentNode) ->
                 _ ->
                     ParentPID ! {invalid_requestid, Response}
             end;
+        {'EXIT', Reason} ->
+            ParentPID ! {error, Reason};
         _ ->
-            ParentPID ! {ok, Response}
+            ParentPID ! {error, Response}
+    end.
+
+join_request(BootstrapNodePID, Id, NewState) ->
+    RequestId = generate_requestId(),
+    {Id, _, KBuckets} = NewState,
+    case catch gen_server:call(BootstrapNodePID, {join_request, Id, RequestId}, 2000) of
+        {k_buckets, ClosestNodesReceived, BootstrapID, RequestIdReceived} ->
+            % Nodo bootstrap raggiungibile, procedo normalmente
+            case RequestId == RequestIdReceived of
+                true ->
+                    BootstrapNode = {BootstrapNodePID, BootstrapID},
+                    %aggiungo il nodo bootstrap  e i suoi nodi
+                    %mandati in risposta ai miei KBuckets
+                    add_nodes_to_kbuckets(
+                        Id, ClosestNodesReceived ++ [BootstrapNode], KBuckets
+                    ),
+                    {ok, NewState};
+                _ ->
+                    {ok, NewState}
+            end;
+        _ ->
+            % Nodo bootstrap non raggiungibile, divento bootstrap
+            {ok, NewState}
     end.
 
 add_nodes_to_kbuckets_cast(PID, NodesToAdd) ->
     gen_server:cast(PID, {add_nodes_to_kbuckets, NodesToAdd}).
 
 generate_node_id() ->
-    % 1. Genera un intero casuale grande (64 bit)
-    % Massimo valore per un intero a 64 bit
+    % Genero un intero casuale grande (64 bit)
     RandomInteger = rand:uniform(18446744073709551615),
-    % 2. Applica la funzione hash SHA-1
+    % Applico la funzione hash SHA-1
     HashValue = crypto:hash(sha, integer_to_binary(RandomInteger)),
-    % 3. Converto l'id in binario grezzo in un intero decimale
+    % Converto l'id in binario grezzo in un intero decimale
     IntHashValue = binary_to_integer_representation(HashValue),
     IntHashValue.
 
@@ -283,17 +286,14 @@ initialize_kbuckets(KBuckets) ->
         fun(N) ->
             {LowerBound, UpperBound} =
                 {LowerBound = 1 bsl N, UpperBound = (1 bsl (N + 1)) - 1},
-            % Inserisci l'intervallo vuoto nella tabella KBuckets
+            % Inserisco l'intervallo vuoto nella tabella KBuckets
             ets:insert(KBuckets, {{LowerBound, UpperBound}, []})
-        % Genera una lista di 160 elementi
         end,
+        % Genero una lista di 160 elementi
         lists:seq(0, 159)
     ).
 
-calcola_distanza(Id1, Id2) ->
-    Distanza = Id1 bxor Id2,
-    %io:format("La distanza calcolata è: ~p ~n", [Distanza]),
-    Distanza.
+calcola_distanza(Id1, Id2) -> Id1 bxor Id2.
 
 find_closest_nodes(Key, KBucketsList) ->
     %Controllare che sia un ID quindi fare check del formato
@@ -401,7 +401,6 @@ add_nodes_to_kbuckets(Id, NodesListToAdd, MyKBuckets) ->
                 _ ->
                     % Determino l'intervallo corretto per questa distanza
                     RightKbucket = get_right_bucket_interval(Distanza, MyKBuckets),
-
                     % Recupero i nodi attualmente presenti nel bucket corretto
                     case RightKbucket of
                         {_, _} ->

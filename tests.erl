@@ -1,24 +1,29 @@
 -module(tests).
 -include("parameters.hrl").
--import(knode, [start_link/2, store_value/2, stop/1]).
+-import(knode, [start_link/1, start_link/2, store_value/2, stop/1]).
 -import(iterative_search, [start_find_value_iterative/2, start_find_node_iterative/2]).
--export([calcola_tempo_find_value/3, calcola_tempo_find_node/3]).
+-export([calcola_tempo_find_value/3, calcola_tempo_find_node/3, start_nodes/1]).
 
 %% Avvia più nodi Kademlia per test
 start_nodes(NumNodes) ->
     start_nodes(NumNodes, {}, []).
 
 start_nodes(0, _, JoinTimeList) ->
-    Media = round(lists:sum(JoinTimeList) / length(JoinTimeList)),
-    io:format("Media dei tempi per la join: ~p, su ~p nodi totali~n~n", [
-        Media, length(JoinTimeList)
-    ]);
+    case length(JoinTimeList) > 0 of
+        true ->
+            Media = round(lists:sum(JoinTimeList) / length(JoinTimeList)),
+            io:format("Media dei tempi per la join: ~p, su ~p nodi totali~n~n", [
+                Media, length(JoinTimeList)
+            ]);
+        _ ->
+            ok
+    end;
 start_nodes(NumNodes, BootstrapNode, JoinTimeList) ->
     Name = list_to_atom("knode_" ++ integer_to_list(NumNodes)),
     case BootstrapNode of
         % Primo nodo, diventa bootstrap
         {} ->
-            start_link(Name, undefined),
+            start_link(Name),
             start_nodes(NumNodes - 1, {Name, whereis(Name)}, JoinTimeList);
         % Nodi successivi, si connettono al bootstrap
         {NameBootstrap, BootstrapNodePID} ->

@@ -3,8 +3,8 @@
 -import(knode, [
     aggiungi_distanza/2,
     generate_requestId/0,
-    find_node/3,
-    find_value/3,
+    find_node_for_spawn/3,
+    find_value_for_spawn/3,
     add_nodes_to_kbuckets_cast/2
 ]).
 -export([
@@ -144,7 +144,7 @@ find_node_spawn(AlphaClosestNodes, Key, ParentNode) ->
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            spawn(fun() -> find_node(PIDNodo, Key, ParentNode) end)
+            spawn(fun() -> find_node_for_spawn(PIDNodo, Key, ParentNode) end)
         end,
         AlphaClosestNodesPID
     ),
@@ -322,7 +322,7 @@ find_value_spawn(AlphaClosestNodes, Key, ParentNode) ->
     % Eseguo la spawn di tanti processi quanti sono gli elementi della lista AlphaClosestNodesPID
     lists:foreach(
         fun(PIDNodo) ->
-            spawn(fun() -> find_value(PIDNodo, Key, ParentNode) end)
+            spawn(fun() -> find_value_for_spawn(PIDNodo, Key, ParentNode) end)
         end,
         AlphaClosestNodesPID
     ),
@@ -344,6 +344,8 @@ start_find_node_iterative(NodePID, Key) ->
                 _ ->
                     {error, invalid_requestid, NodePID}
             end;
+        {'EXIT', Reason} ->
+            {error, not_found, NodePID, Reason};
         _ ->
             {error, not_found, NodePID}
     end.
@@ -370,6 +372,8 @@ start_find_value_iterative(NodePID, Key) ->
                 _ ->
                     {error, invalid_requestid, NodePID}
             end;
+        {'EXIT', Reason} ->
+            {error, Reason};
         _ ->
             {error, NodePID}
     end.
