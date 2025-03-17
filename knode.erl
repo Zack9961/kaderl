@@ -154,12 +154,18 @@ handle_call(_Request, _From, State) ->
     {reply, {error, unknown_request}, State}.
 
 handle_cast({store, Value}, {Id, StoreTable, KBuckets}) ->
-    %Calcola la key
-    HashValue = crypto:hash(sha, integer_to_binary(Value)),
-    Key = binary_to_integer_representation(HashValue),
-    % Inserisci la tupla nella tabella ETS
-    ets:insert(StoreTable, {Key, Value}),
-    {noreply, {Id, StoreTable, KBuckets}};
+    %controllo se è un intero, se non lo è non inserisco nulla
+    case is_integer(Value) of
+        true ->
+            %Calcola la key
+            HashValue = crypto:hash(sha, integer_to_binary(Value)),
+            Key = binary_to_integer_representation(HashValue),
+            % Inserisci la tupla nella tabella ETS
+            ets:insert(StoreTable, {Key, Value}),
+            {noreply, {Id, StoreTable, KBuckets}};
+        _ ->
+            {noreply, {Id, StoreTable, KBuckets}}
+    end;
 handle_cast({store, Key, Value}, {Id, StoreTable, KBuckets}) ->
     % Inserisci la tupla nella tabella ETS
     ets:insert(StoreTable, {Key, Value}),

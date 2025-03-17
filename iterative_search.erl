@@ -92,44 +92,6 @@ find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
             end
     end.
 
-% find_node_iterative(AlphaClosestNodes, Key, ParentNode) ->
-%     find_node_iterative(AlphaClosestNodes, Key, ParentNode, []).
-
-% find_node_iterative(AlphaClosestNodes, Key, ParentNode, BestNodes) ->
-%     ParentPID = self(),
-%     Responses = find_node_spawn(AlphaClosestNodes, Key, ParentNode),
-%     AllNodes = ordsets:to_list(ordsets:from_list(Responses ++ AlphaClosestNodes)),
-%     NodesWithDistance = aggiungi_distanza(AllNodes, Key),
-%     SortedNodes = lists:usort(
-%         fun({_, _, Dist1}, {_, _, Dist2}) -> Dist1 < Dist2 end, NodesWithDistance
-%     ),
-%     NewBestNodes = lists:take(?K, SortedNodes),
-%     case {BestNodes, lists:all(fun(X) -> lists:member(X, NewBestNodes) end, NewBestNodes)} of
-%         {[], _} ->
-%             NewBestNodesNoSelf = lists:filter(fun({Pid, _}) -> Pid /= ParentPID end, NewBestNodes),
-%             add_nodes_to_kbuckets_cast(ParentPID, Responses),
-%             find_node_iterative(
-%                 lists:sublist(NewBestNodesNoSelf, ?A), Key, ParentNode, NewBestNodes
-%             );
-%         {_, true} ->
-%             lists:sublist(BestNodes, ?K);
-%         {_, false} ->
-%             AllReceivedNodes = ordsets:to_list(ordsets:from_list(NewBestNodes ++ BestNodes)),
-%             AllReceivedNodesNoDistance = lists:map(
-%                 fun({PIDNodo, IdNodo, _}) -> {PIDNodo, IdNodo} end, AllReceivedNodes
-%             ),
-%             AllReceivedNodesNoDistanceNoSelf = lists:filter(
-%                 fun({Pid, _}) -> Pid /= ParentPID end, AllReceivedNodesNoDistance
-%             ),
-%             add_nodes_to_kbuckets_cast(ParentPID, Responses),
-%             find_value_iterative(
-%                 lists:sublist(AllReceivedNodesNoDistanceNoSelf, ?A),
-%                 Key,
-%                 ParentNode,
-%                 AllReceivedNodes
-%             )
-%     end.
-
 receive_responses_find_node(0, Responses) ->
     lists:flatten(Responses);
 receive_responses_find_node(N, Responses) ->
